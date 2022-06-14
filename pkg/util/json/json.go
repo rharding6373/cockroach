@@ -440,6 +440,23 @@ func (s *pairSorter) unique() {
 	s.pairs = s.pairs[:top+1]
 }
 
+type pairOrderSorter struct {
+	pairs  []jsonKeyValuePair
+	orders []int
+}
+
+func (s *pairOrderSorter) Len() int {
+	return len(s.pairs)
+}
+
+func (s *pairOrderSorter) Less(i, j int) bool {
+	return s.orders[i] > s.orders[j]
+}
+
+func (s *pairOrderSorter) Swap(i, j int) {
+	s.pairs[i], s.orders[i], s.pairs[j], s.orders[j] = s.pairs[j], s.orders[j], s.pairs[i], s.orders[i]
+}
+
 // jsonObject represents a JSON object as a sorted-by-key list of key-value
 // pairs, which are unique by key.
 type jsonObject []jsonKeyValuePair
