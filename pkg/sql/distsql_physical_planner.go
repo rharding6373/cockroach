@@ -1101,6 +1101,7 @@ func (dsp *DistSQLPlanner) partitionSpansSystem(
 			}
 
 			sqlInstanceID := base.SQLInstanceID(replDesc.NodeID)
+			log.Infof(ctx, "lastKey: %s node: %s", lastKey, sqlInstanceID)
 			partitionIdx, inNodeMap := nodeMap[sqlInstanceID]
 			if !inNodeMap {
 				// This is the first time we are seeing this sqlInstanceID for these
@@ -1190,6 +1191,7 @@ func (dsp *DistSQLPlanner) partitionSpansTenant(
 	nodeMap := make(map[base.SQLInstanceID]int)
 	var lastKey roachpb.Key
 	var lastIdx int
+	it := planCtx.spanIter
 	for i := range spans {
 		span := spans[i]
 		if log.V(1) {
@@ -1206,7 +1208,60 @@ func (dsp *DistSQLPlanner) partitionSpansTenant(
 			}
 			lastKey = safeKey
 		}
+		// rSpan is the span we are currently partitioning.
+		rSpan, err := keys.SpanAddr(span)
+		if err != nil {
+			return nil, err
+		}
+
+		// lastKey maintains the EndKey of the last piece of `span`.
+		lastRKey := rSpan.Key
+		// We break up rSpan into its individual ranges (which may or
+		// may not be on separate nodes). We then create "partitioned
+		// spans" using the end keys of these individual ranges.
+		for it.Seek(ctx, span, kvcoord.Ascending); ; it.Next(ctx) {
+			if !it.Valid() {
+				return nil, it.Error()
+			}
+			replDesc, err := it.ReplicaInfo(ctx)
+			if err != nil {
+				return nil, err
+			}
+			desc := it.Desc()
+			descCpy := desc // don't let desc escape
+			log.Infof(ctx, "lastRKey: %s desc: %s", lastRKey, &descCpy)
+
+			if !desc.ContainsKey(lastRKey) {
+				// This range must contain the last range's EndKey.
+				log.Fatalf(
+					ctx, "next range %v doesn't cover last end key %v. Partitions: %#v",
+					desc.RSpan(), lastRKey, partitions,
+				)
+			}
+
+			// Limit the end key to the end of the span we are resolving.
+			endKey := desc.EndKey
+			if rSpan.EndKey.Less(endKey) {
+				endKey = rSpan.EndKey
+			}
+
+			replDescr, err := dsp.nodeDescs.GetNodeDescriptor(replDesc.NodeID)
+			if err != nil {
+				log.Fatalf(ctx, "unable to get node descriptor for KV node %s", replDesc)
+			}
+			region, ok := replDescr.Locality.Find("region")
+			if !ok {
+				log.Fatalf(ctx, "could not find region for KV node %s", replDesc)
+			}
+			log.Infof(ctx, "Iter Span: %s, key: %s, KV node: %s, Region: %s", span, lastRKey, replDesc.NodeID, region)
+			if !endKey.Less(rSpan.EndKey) {
+				// Done.
+				break
+			}
+			lastRKey = endKey
+		}
 		sqlInstanceID := instances[i%len(instances)].InstanceID
+		log.Infof(ctx, "Span: %s, sqlID: %s, Region: %s", span, sqlInstanceID, instances[i%len(instances)].Locality)
 		partitionIdx, inNodeMap := nodeMap[sqlInstanceID]
 		if !inNodeMap {
 			partitionIdx = len(partitions)
