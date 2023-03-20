@@ -838,7 +838,7 @@ func (b *Builder) buildUDF(
 	//
 	// For strict, set-returning UDFs, the evaluation logic achieves this
 	// behavior.
-	if !isSetReturning && !o.CalledOnNullInput && len(args) > 0 {
+	if !isSetReturning && !o.CalledOnNullInput && len(args) > 0 && !isMultiColOutput {
 		var anyArgIsNull opt.ScalarExpr
 		for i := range args {
 			// Note: We do NOT use a TupleIsNullExpr here if the argument is a
@@ -866,6 +866,17 @@ func (b *Builder) buildUDF(
 			},
 			out,
 		)
+	}
+
+	if isMultiColOutput {
+		rtyp = f.ResolvedType()
+		elems := make([]scopeColumn, len(rtyp.TupleContents()))
+		for i := range rtyp.TupleContents() {
+			e := b.factory.ConstructColumnAccess(out, memo.TupleOrdinal(i))
+			col := b.synthesizeColumn(outScope, scopeColName(""), rtyp.TupleContents()[i], nil, e)
+			elems[i] = *col
+		}
+		outScope.expr = b.constructProject(outScope.expr, elems)
 	}
 
 	// Synthesize an output columns if necessary.

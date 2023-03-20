@@ -1134,14 +1134,18 @@ func (expr *FuncExpr) TypeCheck(
 	// Return NULL if at least one overload is possible, no overload accepts
 	// NULL arguments, the function isn't a generator or aggregate builtin, and
 	// NULL is given as an argument.
-	if len(s.overloadIdxs) > 0 && calledOnNullInputFns.Len() == 0 && funcCls != GeneratorClass &&
-		funcCls != AggregateClass {
-		for _, expr := range s.typedExprs {
-			if expr.ResolvedType().Family() == types.UnknownFamily {
-				return DNull, nil
+	// TODO(harding): Probably want to add something here to prevent multicol output
+	// UDFs from being turned into NULL.
+	/*
+		if len(s.overloadIdxs) > 0 && calledOnNullInputFns.Len() == 0 && funcCls != GeneratorClass &&
+			funcCls != AggregateClass {
+			for _, expr := range s.typedExprs {
+				if expr.ResolvedType().Family() == types.UnknownFamily {
+					return DNull, nil
+				}
 			}
 		}
-	}
+	*/
 
 	if len(s.overloadIdxs) == 0 {
 		return nil, pgerror.Newf(pgcode.UndefinedFunction, "unknown signature: %s", getFuncSig(expr, s.typedExprs, desired))
