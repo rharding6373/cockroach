@@ -166,6 +166,7 @@ CREATE FUNCTION all_ab() RETURNS SETOF ab LANGUAGE SQL AS $$
   SELECT a, b FROM ab
 $$
 
+# TODO: fixme value type int doesn't match type tuple{int AS a, int AS b} of column "a"
 query II rowsort
 SELECT * FROM all_ab()
 ----

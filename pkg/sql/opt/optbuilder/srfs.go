@@ -86,6 +86,8 @@ func (b *Builder) buildZip(exprs tree.Exprs, inScope *scope) (outScope *scope) {
 
 	// Build each of the provided expressions.
 	zip := make(memo.ZipExpr, 0, len(exprs))
+	isMultiColUDF := make([]bool, 0, len(exprs))
+	hasMultiColUDF := false
 	var outCols opt.ColSet
 	for _, expr := range exprs {
 		// Output column names should exactly match the original expression, so we
@@ -112,6 +114,8 @@ func (b *Builder) buildZip(exprs tree.Exprs, inScope *scope) (outScope *scope) {
 		startCols := len(outScope.cols)
 
 		isRecordReturningUDF := def != nil && funcExpr.ResolvedOverload().IsUDF && texpr.ResolvedType().Family() == types.TupleFamily && b.insideDataSource
+		isMultiColUDF = append(isMultiColUDF, isRecordReturningUDF)
+		hasMultiColUDF = hasMultiColUDF || isRecordReturningUDF
 
 		if def == nil || (funcExpr.ResolvedOverload().Class != tree.GeneratorClass && !isRecordReturningUDF) || (b.shouldCreateDefaultColumn(texpr) && !isRecordReturningUDF) {
 			if def != nil && len(funcExpr.ResolvedOverload().ReturnLabels) > 0 {
@@ -155,23 +159,55 @@ func (b *Builder) buildZip(exprs tree.Exprs, inScope *scope) (outScope *scope) {
 		ID:   b.factory.Metadata().NextUniqueID(),
 	})
 	outScope.expr = b.factory.ConstructProjectSet(input, zip)
+	// TODO(harding): The following appears to work for the udf SELECT ROW(a, b) case
+	// for a strict udf with a null input, but wouldn't extend to more generic cases.
+	if hasMultiColUDF {
+		outScope = outScope.push()
+		lastAlias := inScope.alias
+		elems := make([]scopeColumn, 0)
+		c := 0
+		for j, z := range zip {
+			if isMultiColUDF[j] {
+				c++
+				for i := range z.Typ.TupleContents() {
+					e := b.factory.ConstructColumnAccess(z.Fn, memo.TupleOrdinal(i))
+					typ := z.Typ.TupleContents()[i]
+					name := tree.Name("")
+					if lastAlias != nil && len(lastAlias.Cols) > 0 {
+						if lastAlias.Cols[i].Type == nil {
+							panic(pgerror.Newf(pgcode.Syntax, "a column definition list is required for functions returning \"record\""))
+						}
+						var err error
+						typ, err = tree.ResolveType(b.ctx, lastAlias.Cols[i].Type, b.semaCtx.TypeResolver)
+						if err != nil {
+							panic(err)
+						}
+						name = lastAlias.Cols[i].Name
+					} else if len(z.Typ.TupleLabels()) >= i {
+						name = tree.Name(z.Typ.TupleLabels()[i])
+					}
+					col := b.synthesizeColumn(outScope, scopeColName(name), typ, nil, e)
+					elems = append(elems, *col)
+				}
+			} else {
+				for range z.Cols {
+					col := b.synthesizeColumn(outScope, scopeColName(""), outScope.parent.cols[c].typ, outScope.parent.cols[c].expr, outScope.parent.cols[c].scalar)
+					elems = append(elems, *col)
+					c++
+				}
+
+			}
+		}
+		outScope.expr = b.constructProject(outScope.parent.expr, elems)
+	}
 	if len(outScope.cols) == 1 {
 		outScope.singleSRFColumn = true
 	}
+
 	return outScope
 }
 
-// finishBuildGeneratorFunction finishes building a set-generating function
-// (SRF) such as generate_series() or unnest(). It synthesizes new columns in
-// outScope for each of the SRF's output columns.
-func (b *Builder) finishBuildGeneratorFunction(
-	f *tree.FuncExpr,
-	def *tree.Overload,
-	fn opt.ScalarExpr,
-	inScope, outScope *scope,
-	outCol *scopeColumn,
-) (out opt.ScalarExpr) {
-	lastAlias := inScope.alias
+func (b *Builder) checkColDefForRecord(def *tree.Overload, lastAlias *tree.AliasClause) {
 	if def.ReturnsRecordType {
 		if lastAlias == nil {
 			panic(pgerror.New(pgcode.Syntax, "a column definition list is required for functions returning \"record\""))
@@ -185,6 +221,21 @@ func (b *Builder) finishBuildGeneratorFunction(
 			}
 		}
 	}
+}
+
+// finishBuildGeneratorFunction finishes building a set-generating function
+// (SRF) such as generate_series() or unnest(). It synthesizes new columns in
+// outScope for each of the SRF's output columns.
+func (b *Builder) finishBuildGeneratorFunction(
+	f *tree.FuncExpr,
+	def *tree.Overload,
+	fn opt.ScalarExpr,
+	inScope, outScope *scope,
+	outCol *scopeColumn,
+) (out opt.ScalarExpr) {
+	lastAlias := inScope.alias
+	b.checkColDefForRecord(def, lastAlias)
+
 	// Add scope columns.
 	if outCol != nil {
 		// Single-column return type.

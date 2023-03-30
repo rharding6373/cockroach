@@ -117,7 +117,7 @@ func (g *routineGenerator) Start(ctx context.Context, txn *kv.Txn) (err error) {
 	if g.expr.MultiColOutput {
 		// A routine with multiple output column should have its types in a tuple.
 		if rt.Family() != types.TupleFamily {
-			panic(errors.AssertionFailedf("routine expected to return multiple columns"))
+			return errors.New("routine expected to return multiple columns")
 		}
 		retTypes = make([]*types.T, len(rt.TupleContents()))
 		for i, c := range rt.TupleContents() {

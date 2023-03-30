@@ -13,7 +13,6 @@ package optbuilder
 import (
 	"context"
 	"fmt"
-
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/seqexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
@@ -722,7 +721,7 @@ func (b *Builder) buildUDF(
 				if isSingleTupleResult {
 					// When the final statement returns a single tuple, we can use the
 					// tuple's types as the function return type.
-					rtyp = types.MakeLabeledTuple(stmtScope.cols[0].typ.TupleContents(), stmtScope.cols[0].typ.TupleLabels())
+					rtyp = stmtScope.cols[0].typ
 				} else {
 					// Get the types from the individual columns of the last statement.
 					tc := make([]*types.T, len(stmtScope.cols))
@@ -740,28 +739,32 @@ func (b *Builder) buildUDF(
 			// Only a single column can be returned from a UDF, unless it is used as a
 			// data source. Data sources may output multiple columns, and if the
 			// statement body produces a tuple it needs to be expanded into columns.
-			// When not used as a data source, statements producing multiple columns, combine them into a tuple. If the last statement is already returning a tuple
-			// and the function has a record return type, then do not need wrap the
-			// output in another tuple.
+			// When not used as a data source, statements producing multiple columns,
+			// combine them into a tuple. If the last statement is already returning a
+			// tuple and the function has a record return type, then do not need wrap
+			// the output in another tuple.
 			cols := physProps.Presentation
-			if b.insideDataSource && rtyp.Family() == types.TupleFamily {
-				// When the UDF is used as a data source and expects to output a tuple
-				// type, its output needs to be a row of columns instead of the usual
-				// tuple. If the last statement output a tuple, we need to expand the
-				// tuple into individual columns.
-				isMultiColOutput = true
-				if isSingleTupleResult {
-					stmtScope = bodyScope.push()
-					elems := make([]scopeColumn, len(rtyp.TupleContents()))
-					for i := range rtyp.TupleContents() {
-						e := b.factory.ConstructColumnAccess(b.factory.ConstructVariable(cols[0].ID), memo.TupleOrdinal(i))
-						col := b.synthesizeColumn(stmtScope, scopeColName(""), rtyp.TupleContents()[i], nil, e)
-						elems[i] = *col
-					}
-					expr = b.constructProject(expr, elems)
-					physProps = stmtScope.makePhysicalProps()
-				}
-			} else if len(cols) > 1 || (types.IsRecordType(rtyp) && !isSingleTupleResult) {
+			/*
+				if b.insideDataSource && rtyp.Family() == types.TupleFamily {
+					// When the UDF is used as a data source and expects to output a tuple
+					// type, its output needs to be a row of columns instead of the usual
+					// tuple. If the last statement output a tuple, we need to expand the
+					// tuple into individual columns.
+					//isMultiColOutput = true
+					// TODO(harding): Only do this if we are not calling on null input?
+						if isSingleTupleResult {
+							stmtScope = bodyScope.push()
+							elems := make([]scopeColumn, len(rtyp.TupleContents()))
+							for i := range rtyp.TupleContents() {
+								e := b.factory.ConstructColumnAccess(b.factory.ConstructVariable(cols[0].ID), memo.TupleOrdinal(i))
+								col := b.synthesizeColumn(stmtScope, scopeColName(""), rtyp.TupleContents()[i], nil, e)
+								elems[i] = *col
+							}
+							expr = b.constructProject(expr, elems)
+							physProps = stmtScope.makePhysicalProps()
+						}
+				} else */
+			if len(cols) > 1 || (types.IsRecordType(rtyp) && !isSingleTupleResult) {
 				// Only a single column can be returned from a UDF, unless it is used as a
 				// data source (see comment above). If there are multiple columns, combine
 				// them into a tuple. If the last statement is already returning a tuple
@@ -838,7 +841,7 @@ func (b *Builder) buildUDF(
 	//
 	// For strict, set-returning UDFs, the evaluation logic achieves this
 	// behavior.
-	if !isSetReturning && !o.CalledOnNullInput && len(args) > 0 && !isMultiColOutput {
+	if !isSetReturning && !o.CalledOnNullInput && len(args) > 0 {
 		var anyArgIsNull opt.ScalarExpr
 		for i := range args {
 			// Note: We do NOT use a TupleIsNullExpr here if the argument is a
@@ -856,35 +859,66 @@ func (b *Builder) buildUDF(
 			}
 			anyArgIsNull = b.factory.ConstructOr(argIsNull, anyArgIsNull)
 		}
+		/*
+			var nullExpr opt.ScalarExpr
+			if isMultiColOutput {
+				// Make a tuple of all the null types. We'll expand this tuple later to
+				// extract the nulls.
+				elems := make(memo.ScalarListExpr, len(f.ResolvedType().TupleContents()))
+				for i := range f.ResolvedType().TupleContents() {
+					elems[i] = b.factory.ConstructNull(f.ResolvedType().TupleContents()[i])
+				}
+				nullExpr = b.factory.ConstructTuple(elems, rtyp)
+			} else {
+				nullExpr = b.factory.ConstructNull(f.ResolvedType())
+			}
+		*/
+		nullExpr := b.factory.ConstructNull(f.ResolvedType())
 		out = b.factory.ConstructCase(
 			memo.TrueSingleton,
 			memo.ScalarListExpr{
 				b.factory.ConstructWhen(
 					anyArgIsNull,
-					b.factory.ConstructNull(f.ResolvedType()),
+					nullExpr,
 				),
 			},
 			out,
 		)
 	}
 
-	if isMultiColOutput {
-		rtyp = f.ResolvedType()
-		elems := make([]scopeColumn, len(rtyp.TupleContents()))
-		for i := range rtyp.TupleContents() {
-			e := b.factory.ConstructColumnAccess(out, memo.TupleOrdinal(i))
-			col := b.synthesizeColumn(outScope, scopeColName(""), rtyp.TupleContents()[i], nil, e)
-			elems[i] = *col
+	/*
+		if isMultiColOutput {
+			rtyp = f.ResolvedType()
+			elems := make([]scopeColumn, len(rtyp.TupleContents()))
+			colids := make(opt.ColList, len(rtyp.TupleContents()))
+			for i := range rtyp.TupleContents() {
+				e := b.factory.ConstructColumnAccess(out, memo.TupleOrdinal(i))
+				col := b.synthesizeColumn(outScope, scopeColName(""), rtyp.TupleContents()[i], nil, e)
+				elems[i] = *col
+				colids[i] = col.id
+			}
+			b.factory.construct
+			//outScope.expr = b.constructProject(memo.EmptyScalarListExpr, elems)
+			outScope.expr = b.factory.ConstructValues(memo.EmptyScalarListExpr, &memo.ValuesPrivate{
+				Cols: colids,
+				ID:   b.factory.Metadata().NextUniqueID(),
+			})
+
 		}
-		outScope.expr = b.constructProject(outScope.expr, elems)
-	}
+	*/
 
 	// Synthesize an output columns if necessary.
 	if outCol == nil {
-		if isMultiColOutput {
+		if b.insideDataSource && f.ResolvedType().Family() == types.TupleFamily {
 			f.ResolvedOverload().ReturnsRecordType = types.IsRecordType(rtyp)
-			return b.finishBuildGeneratorFunction(f, f.ResolvedOverload(), out, inScope, outScope, outCol)
+			b.checkColDefForRecord(f.ResolvedOverload(), inScope.alias)
 		}
+		/*
+			if isMultiColOutput {
+				f.ResolvedOverload().ReturnsRecordType = types.IsRecordType(rtyp)
+				return b.finishBuildGeneratorFunction(f, f.ResolvedOverload(), out, inScope, outScope, outCol)
+			}
+		*/
 		if outScope != nil {
 			outCol = b.synthesizeColumn(outScope, scopeColName(""), f.ResolvedType(), nil /* expr */, out)
 		}
