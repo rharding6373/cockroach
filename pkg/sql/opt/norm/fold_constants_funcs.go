@@ -595,7 +595,11 @@ func (c *CustomFuncs) FoldColumnAccess(
 	// already folded an Indirection expression with an out-of-bounds index to
 	// Null.
 	if n, ok := input.(*memo.NullExpr); ok {
-		return c.f.ConstructNull(n.Typ.TupleContents()[idx]), true
+		if n.Typ.Family() == types.TupleFamily {
+			return c.f.ConstructNull(n.Typ.TupleContents()[idx]), true
+		} else {
+			return input, true
+		}
 	}
 
 	// Case 2: The input is a static tuple constructor.
