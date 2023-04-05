@@ -12,7 +12,6 @@ package eval
 
 import (
 	"context"
-
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"

@@ -265,10 +265,10 @@ SELECT * FROM f_strict_arg(1,2) AS foo(a INT, b INT);
 a b
 1 2
 
-# TODO(harding): The result should be NULL NULL, one for each column,
-# instead of NULL.
-statement error pq: source "foo" has 1 columns available but 2 columns specified
+query II
 SELECT * FROM f_strict_arg(NULL, 2) AS foo(a INT, b INT);
+----
+NULL NULL
 
 statement ok
 CREATE FUNCTION f_strict_arg_setof(IN a INT, IN b INT) RETURNS SETOF RECORD STRICT AS
