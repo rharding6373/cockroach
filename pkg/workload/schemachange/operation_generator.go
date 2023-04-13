@@ -34,7 +34,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
 	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -1370,6 +1369,15 @@ func (og *operationGenerator) createTable(ctx context.Context, tx pgx.Tx) (*opSt
 		return nil, err
 	}
 
+	// JsonB columns support in indexes were added in 23.2, so check the index
+	// definitions for them in mixed version states.
+	jsonbColsInIndexesNotSupported, err := isClusterVersionLessThan(
+		ctx,
+		tx,
+		clusterversion.ByKey(clusterversion.V23_2Start))
+	if err != nil {
+		return nil, err
+	}
 	tableExists, err := og.tableExists(ctx, tx, tableName)
 	if err != nil {
 		return nil, err
@@ -1389,6 +1397,7 @@ func (og *operationGenerator) createTable(ctx context.Context, tx pgx.Tx) (*opSt
 		{code: pgcode.Syntax, condition: hasUnsupportedTSQuery},
 		{code: pgcode.FeatureNotSupported, condition: hasUnsupportedTSQuery},
 		{code: pgcode.FeatureNotSupported, condition: hasUnsupportedForwardQueries},
+		{code: pgcode.FeatureNotSupported, condition: jsonbColsInIndexesNotSupported},
 	}.add(opStmt.potentialExecErrors)
 	// Descriptor ID generator may be temporarily unavailable, so
 	// allow uncategorized errors temporarily.
