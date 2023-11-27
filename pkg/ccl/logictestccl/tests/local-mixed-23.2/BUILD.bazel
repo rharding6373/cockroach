@@ -1,13 +1,9 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
 
 go_test(
-    name = "fakedist-disk_test",
+    name = "local-mixed-23_2_test",
     size = "enormous",
     srcs = ["generated_test.go"],
-    args = select({
-        "//build/toolchains:use_ci_timeouts": ["-test.timeout=895s"],
-        "//conditions:default": ["-test.timeout=3595s"],
-    }),
     data = [
         "//c-deps:libgeos",  # keep
         "//pkg/ccl/logictestccl:testdata",  # keep
@@ -16,7 +12,7 @@ go_test(
     shard_count = 16,
     tags = [
         "ccl_test",
-        "cpu:2",
+        "cpu:1",
     ],
     deps = [
         "//pkg/base",
