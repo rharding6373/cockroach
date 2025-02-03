@@ -396,7 +396,7 @@ func RunNemesis(
 
 	if nOp.EnableSQLSmith {
 		queryGen, _ := sqlsmith.NewSmither(db, rng,
-			sqlsmith.MutationsOnly(),
+			sqlsmith.SimpleMutationsOnly(),
 			sqlsmith.SetScalarComplexity(0.5),
 			sqlsmith.SetComplexity(0.1),
 			// TODO(#129072): Reenable cross joins when the likelihood of generating
