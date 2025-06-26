@@ -28,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
-	"github.com/cockroachdb/cockroach/pkg/rpc/rpcbase"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/settingswatcher"
 	"github.com/cockroachdb/cockroach/pkg/settings"
@@ -223,9 +222,9 @@ type connector struct {
 // client represents an RPC client that proxies to a KV instance.
 type client struct {
 	kvpb.InternalClient
-	serverpb.RPCStatusClient
-	serverpb.RPCAdminClient
-	tspb.RPCTimeSeriesClient
+	serverpb.StatusClient
+	serverpb.AdminClient
+	tspb.TimeSeriesClient
 }
 
 // connector is capable of providing information on each of the KV nodes in the
@@ -636,16 +635,6 @@ func (c *connector) Gossip(
 	return
 }
 
-func (c *connector) EngineStats(
-	ctx context.Context, req *serverpb.EngineStatsRequest,
-) (resp *serverpb.EngineStatsResponse, retErr error) {
-	retErr = c.withClient(ctx, func(ctx context.Context, client *client) (err error) {
-		resp, err = client.EngineStats(ctx, req)
-		return
-	})
-	return
-}
-
 // NewIterator implements the rangedesc.IteratorFactory interface.
 func (c *connector) NewIterator(
 	ctx context.Context, span roachpb.Span,
@@ -976,19 +965,17 @@ func (c *connector) dialAddrs(ctx context.Context) (*client, error) {
 		// Try each address on each retry iteration (in random order).
 		for _, i := range rand.Perm(len(c.addrs)) {
 			addr := c.addrs[i]
-			if !rpcbase.TODODRPC {
-				conn, err := c.dialAddr(ctx, addr)
-				if err != nil {
-					log.Warningf(ctx, "error dialing tenant KV address %s: %v", addr, err)
-					continue
-				}
-				return &client{
-					InternalClient:      kvpb.NewInternalClient(conn),
-					RPCStatusClient:     serverpb.NewGRPCStatusClientAdapter(conn),
-					RPCAdminClient:      serverpb.NewGRPCAdminClientAdapter(conn),
-					RPCTimeSeriesClient: tspb.NewGRPCTimeSeriesClientAdapter(conn),
-				}, nil
+			conn, err := c.dialAddr(ctx, addr)
+			if err != nil {
+				log.Warningf(ctx, "error dialing tenant KV address %s: %v", addr, err)
+				continue
 			}
+			return &client{
+				InternalClient:   kvpb.NewInternalClient(conn),
+				StatusClient:     serverpb.NewStatusClient(conn),
+				AdminClient:      serverpb.NewAdminClient(conn),
+				TimeSeriesClient: tspb.NewTimeSeriesClient(conn),
+			}, nil
 		}
 	}
 	return nil, errors.Wrap(ctx.Err(), "dial addrs")

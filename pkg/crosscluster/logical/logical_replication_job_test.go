@@ -913,7 +913,7 @@ func TestRandomTables(t *testing.T) {
 			rng,
 			tableName,
 			1,
-			[]randgen.TableOption{randgen.WithSkipColumnFamilyMutations()})
+			randgen.TableOptSkipColumnFamilyMutations)
 		stmt := tree.SerializeForDisplay(createStmt)
 		t.Log(stmt)
 		runnerA.Exec(t, stmt)
@@ -2790,7 +2790,18 @@ func TestGetWriterType(t *testing.T) {
 		require.Equal(t, sqlclustersettings.LDRWriterTypeSQL, wt)
 	})
 
-	t.Run("immediate-mode", func(t *testing.T) {
+	t.Run("immediate-mode-pre-25.2", func(t *testing.T) {
+		st := cluster.MakeTestingClusterSettingsWithVersions(
+			clusterversion.V25_1.Version(),
+			clusterversion.V25_1.Version(),
+			true, /* initializeVersion */
+		)
+		wt, err := getWriterType(ctx, jobspb.LogicalReplicationDetails_Immediate, st)
+		require.NoError(t, err)
+		require.Equal(t, sqlclustersettings.LDRWriterTypeLegacyKV, wt)
+	})
+
+	t.Run("immediate-mode-post-25.2", func(t *testing.T) {
 		st := cluster.MakeTestingClusterSettingsWithVersions(
 			clusterversion.V25_2.Version(),
 			clusterversion.PreviousRelease.Version(),

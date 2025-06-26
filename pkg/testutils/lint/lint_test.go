@@ -2089,6 +2089,8 @@ func TestLint(t *testing.T) {
 			stream.GrepNot(`pkg/cmd/mirror/go/mirror.go`),
 			// As above, the bazel build tag has an impact here.
 			stream.GrepNot(`pkg/testutils/docker/single_node_docker_test.go`),
+			// TODO(#143870): remove uses of this package.
+			stream.GrepNot(`"golang.org/x/exp/rand" is deprecated`),
 		}
 		for analyzerName, config := range nogoConfig {
 			if !staticcheckCheckNameRe.MatchString(analyzerName) {
@@ -2854,8 +2856,7 @@ func TestLint(t *testing.T) {
 		}
 	})
 
-	// Test forbidden roachtest imports. The mixedversion and task packages are
-	// allowed because they are part of the roachtest framework.
+	// Test forbidden roachtest imports.
 	t.Run("TestRoachtestForbiddenImports", func(t *testing.T) {
 		t.Parallel()
 
@@ -2891,8 +2892,7 @@ func TestLint(t *testing.T) {
 			filter,
 			stream.Sort(),
 			stream.Uniq(),
-			stream.Grep(`cockroach/pkg/cmd/roachtest/.*: `),
-			stream.GrepNot(`cockroach/pkg/cmd/roachtest/roachtestutil/(mixedversion|task): `),
+			stream.Grep(`cockroach/pkg/cmd/roachtest/(tests|operations): `),
 		), func(s string) {
 			pkgStr := strings.Split(s, ": ")
 			_, importedPkg := pkgStr[0], pkgStr[1]

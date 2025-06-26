@@ -602,20 +602,6 @@ func (mr *MockClusterMockRecorder) Nodes(arg0 ...interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Nodes", reflect.TypeOf((*MockCluster)(nil).Nodes), arg0...)
 }
 
-// PopulateEtcHosts mocks base method.
-func (m *MockCluster) PopulateEtcHosts(arg0 context.Context, arg1 *logger.Logger) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "PopulateEtcHosts", arg0, arg1)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// PopulateEtcHosts indicates an expected call of PopulateEtcHosts.
-func (mr *MockClusterMockRecorder) PopulateEtcHosts(arg0, arg1 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PopulateEtcHosts", reflect.TypeOf((*MockCluster)(nil).PopulateEtcHosts), arg0, arg1)
-}
-
 // Put mocks base method.
 func (m *MockCluster) Put(arg0 context.Context, arg1, arg2 string, arg3 ...option.Option) {
 	m.ctrl.T.Helper()
@@ -737,20 +723,6 @@ func (m *MockCluster) RegisterClusterHook(arg0 string, arg1 option.ClusterHookTy
 func (mr *MockClusterMockRecorder) RegisterClusterHook(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RegisterClusterHook", reflect.TypeOf((*MockCluster)(nil).RegisterClusterHook), arg0, arg1, arg2, arg3)
-}
-
-// Reset mocks base method.
-func (m *MockCluster) Reset(arg0 context.Context, arg1 *logger.Logger, arg2 option.NodeListOption) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Reset", arg0, arg1, arg2)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// Reset indicates an expected call of Reset.
-func (mr *MockClusterMockRecorder) Reset(arg0, arg1, arg2 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Reset", reflect.TypeOf((*MockCluster)(nil).Reset), arg0, arg1, arg2)
 }
 
 // Run mocks base method.

@@ -586,15 +586,15 @@ func cFetcherFirstBatchLimit(limitHint rowinfra.RowLimit, maxKeysPerRow uint32) 
 func (cf *cFetcher) StartScan(
 	ctx context.Context,
 	spans roachpb.Spans,
-	parallelize bool,
+	limitBatches bool,
 	batchBytesLimit rowinfra.BytesLimit,
 	limitHint rowinfra.RowLimit,
 ) error {
 	if len(spans) == 0 {
 		return errors.AssertionFailedf("no spans")
 	}
-	if parallelize && batchBytesLimit != rowinfra.NoBytesLimit {
-		return errors.AssertionFailedf("TargetBytes limit requested with parallelize=true")
+	if !limitBatches && batchBytesLimit != rowinfra.NoBytesLimit {
+		return errors.AssertionFailedf("batchBytesLimit set without limitBatches")
 	}
 
 	firstBatchLimit := cFetcherFirstBatchLimit(limitHint, cf.table.spec.MaxKeysPerRow)

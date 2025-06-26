@@ -170,12 +170,12 @@ func (r *Replica) updateTimestampCache(
 			// transaction's MinTimestamp, which is consulted in CanCreateTxnRecord.
 			key := transactionTombstoneMarker(start, txnID)
 			addToTSCache(key, nil, ts, txnID)
-			// Additionally, EndTxn requests that release local replicated locks for
-			// committed transactions bump the timestamp cache over those lock spans
-			// to the commit timestamp of the transaction to ensure that the released
-			// locks continue to provide protection against writes underneath the
-			// transaction's commit timestamp.
-			for _, sp := range resp.(*kvpb.EndTxnResponse).ReplicatedLocalLocksReleasedOnCommit {
+			// Additionally, EndTxn requests that release replicated locks for
+			// committed transactions bump the timestamp cache over those lock
+			// spans to the commit timestamp of the transaction to ensure that
+			// the released locks continue to provide protection against writes
+			// underneath the transaction's commit timestamp.
+			for _, sp := range resp.(*kvpb.EndTxnResponse).ReplicatedLocksReleasedOnCommit {
 				addToTSCache(sp.Key, sp.EndKey, br.Txn.WriteTimestamp, txnID)
 			}
 		case *kvpb.HeartbeatTxnRequest:
@@ -268,6 +268,13 @@ func (r *Replica) updateTimestampCache(
 			// ConditionalPut only updates on ConditionFailedErrors. On other
 			// errors, no information is returned. On successful writes, the
 			// intent already protects against writes underneath the read.
+			if _, ok := pErr.GetDetail().(*kvpb.ConditionFailedError); ok {
+				addToTSCache(start, end, ts, txnID)
+			}
+		case *kvpb.InitPutRequest:
+			// InitPut only updates on ConditionFailedErrors. On other errors,
+			// no information is returned. On successful writes, the intent
+			// already protects against writes underneath the read.
 			if _, ok := pErr.GetDetail().(*kvpb.ConditionFailedError); ok {
 				addToTSCache(start, end, ts, txnID)
 			}
@@ -378,7 +385,8 @@ func init() {
 
 // applyTimestampCache moves the batch timestamp forward depending on
 // the presence of overlapping entries in the timestamp cache. If the
-// batch is transactional the txn timestamp is updated.
+// batch is transactional, the txn timestamp and the txn.WriteTooOld
+// bool are updated.
 //
 // Two important invariants of Cockroach: 1) encountering a more
 // recently written value means transaction restart. 2) values must

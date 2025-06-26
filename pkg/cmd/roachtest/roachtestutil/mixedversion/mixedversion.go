@@ -295,11 +295,6 @@ type (
 		// Run implements the actual functionality of the step. This
 		// signature should remain in sync with `stepFunc`.
 		Run(context.Context, *logger.Logger, *rand.Rand, *Helper) error
-		// ConcurrencyDisabled returns true if the step should not be run
-		// concurrently with other steps. This is the case for any steps
-		// that involve restarting a node, as they may attempt to connect
-		// to an unavailable node.
-		ConcurrencyDisabled() bool
 	}
 
 	// singleStep represents steps that implement the pieces on top of
@@ -523,28 +518,6 @@ func DisableMutators(names ...string) CustomOption {
 		for _, name := range names {
 			WithMutatorProbability(name, 0)(opts)
 		}
-	}
-}
-
-// DisableAllMutators will disable all available mutators.
-func DisableAllMutators() CustomOption {
-	return func(opts *testOptions) {
-		names := []string{}
-		for _, m := range planMutators {
-			names = append(names, m.Name())
-		}
-		DisableMutators(names...)(opts)
-	}
-}
-
-// DisableAllClusterSettingMutators will disable all available cluster setting mutators.
-func DisableAllClusterSettingMutators() CustomOption {
-	return func(opts *testOptions) {
-		names := []string{}
-		for _, m := range clusterSettingMutators {
-			names = append(names, m.Name())
-		}
-		DisableMutators(names...)(opts)
 	}
 }
 

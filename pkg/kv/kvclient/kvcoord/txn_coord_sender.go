@@ -217,10 +217,6 @@ type txnInterceptor interface {
 	// createSavepointLocked().
 	rollbackToSavepointLocked(context.Context, savepoint)
 
-	// releaseSavepointLocked is called when a savepoint is being
-	// released.
-	releaseSavepointLocked(context.Context, *savepoint)
-
 	// closeLocked closes the interceptor. It is called when the TxnCoordSender
 	// shuts down due to either a txn commit or a txn abort. The method will
 	// be called exactly once from cleanupTxnLocked.
@@ -890,9 +886,6 @@ func (tc *TxnCoordSender) handleRetryableErrLocked(ctx context.Context, pErr *kv
 
 	case *kvpb.ReadWithinUncertaintyIntervalError:
 		tc.metrics.RestartsReadWithinUncertainty.Inc()
-
-	case *kvpb.ExclusionViolationError:
-		tc.metrics.RestartsExclusionViolation.Inc()
 
 	case *kvpb.TransactionAbortedError:
 		tc.metrics.RestartsTxnAborted.Inc()

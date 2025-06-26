@@ -1105,7 +1105,7 @@ func TestCreateCheckpoint_SpanConstrained(t *testing.T) {
 	for i := 1; i <= maxTableID; i++ {
 		require.NoError(t, b.PutMVCC(
 			MVCCKey{Key: key(i), Timestamp: hlc.Timestamp{WallTime: int64(i)}},
-			MVCCValue{Value: roachpb.MakeValueFromBytes(randutil.RandBytes(rng, 100))},
+			MVCCValue{Value: roachpb.Value{RawBytes: randutil.RandBytes(rng, 100)}},
 		))
 	}
 	require.NoError(t, b.Commit(true /* sync */))
@@ -1205,7 +1205,7 @@ func TestIngestDelayLimit(t *testing.T) {
 		{max, 55, -1},
 	} {
 		var m pebble.Metrics
-		m.Levels[0].TablesCount = tc.fileCount
+		m.Levels[0].NumFiles = tc.fileCount
 		m.Levels[0].Sublevels = tc.sublevelCount
 		require.Equal(t, tc.exp, calculatePreIngestDelay(s, &m))
 	}
@@ -1640,7 +1640,7 @@ func TestScanLocks(t *testing.T) {
 	for k, str := range locks {
 		var err error
 		if str == lock.Intent {
-			_, err = MVCCPut(ctx, eng, roachpb.Key(k), txn1.ReadTimestamp, roachpb.MakeValueFromBytes(roachpb.Key(k)), MVCCWriteOptions{Txn: txn1})
+			_, err = MVCCPut(ctx, eng, roachpb.Key(k), txn1.ReadTimestamp, roachpb.Value{RawBytes: roachpb.Key(k)}, MVCCWriteOptions{Txn: txn1})
 		} else {
 			err = MVCCAcquireLock(ctx, eng, &txn1.TxnMeta, txn1.IgnoredSeqNums, str, roachpb.Key(k), nil, 0, 0)
 		}
@@ -1813,7 +1813,7 @@ func TestEngineClearRange(t *testing.T) {
 
 		"ClearRangeWithHeuristic individual": {
 			clearRange: func(rw ReadWriter, start, end roachpb.Key) error {
-				return ClearRangeWithHeuristic(ctx, rw, rw, start, end, math.MaxInt)
+				return ClearRangeWithHeuristic(ctx, rw, rw, start, end, math.MaxInt, math.MaxInt)
 			},
 			clearsPointKeys: true,
 			clearsRangeKeys: true,
@@ -1821,7 +1821,7 @@ func TestEngineClearRange(t *testing.T) {
 		},
 		"ClearRangeWithHeuristic ranged": {
 			clearRange: func(rw ReadWriter, start, end roachpb.Key) error {
-				return ClearRangeWithHeuristic(ctx, rw, rw, start, end, 1)
+				return ClearRangeWithHeuristic(ctx, rw, rw, start, end, 1, 1)
 			},
 			clearsPointKeys: true,
 			clearsRangeKeys: true,
@@ -1829,9 +1829,33 @@ func TestEngineClearRange(t *testing.T) {
 		},
 		"ClearRangeWithHeuristic point keys individual": {
 			clearRange: func(rw ReadWriter, start, end roachpb.Key) error {
-				return ClearRangeWithHeuristic(ctx, rw, rw, start, end, math.MaxInt)
+				return ClearRangeWithHeuristic(ctx, rw, rw, start, end, math.MaxInt, 0)
 			},
 			clearsPointKeys: true,
+			clearsRangeKeys: false,
+			clearsIntents:   false,
+		},
+		"ClearRangeWithHeuristic point keys ranged": {
+			clearRange: func(rw ReadWriter, start, end roachpb.Key) error {
+				return ClearRangeWithHeuristic(ctx, rw, rw, start, end, 1, 0)
+			},
+			clearsPointKeys: true,
+			clearsRangeKeys: false,
+			clearsIntents:   false,
+		},
+		"ClearRangeWithHeuristic range keys individual": {
+			clearRange: func(rw ReadWriter, start, end roachpb.Key) error {
+				return ClearRangeWithHeuristic(ctx, rw, rw, start, end, 0, math.MaxInt)
+			},
+			clearsPointKeys: false,
+			clearsRangeKeys: true,
+			clearsIntents:   false,
+		},
+		"ClearRangeWithHeuristic range keys ranged": {
+			clearRange: func(rw ReadWriter, start, end roachpb.Key) error {
+				return ClearRangeWithHeuristic(ctx, rw, rw, start, end, 0, 1)
+			},
+			clearsPointKeys: false,
 			clearsRangeKeys: true,
 			clearsIntents:   false,
 		},
@@ -2135,7 +2159,7 @@ func TestScanConflictingIntentsForDroppingLatchesEarly(t *testing.T) {
 	keyB := roachpb.Key("b")
 	keyC := roachpb.Key("c")
 	keyD := roachpb.Key("d")
-	val := roachpb.MakeValueFromString("v")
+	val := roachpb.Value{RawBytes: []byte{'v'}}
 
 	testCases := []struct {
 		name                  string
@@ -2356,7 +2380,7 @@ func TestScanConflictingIntentsForDroppingLatchesEarlyReadYourOwnWrites(t *testi
 	aboveReadSeqNumber := enginepb.TxnSeq(3)
 
 	keyA := roachpb.Key("a")
-	val := roachpb.MakeValueFromString("v")
+	val := roachpb.Value{RawBytes: []byte{'v'}}
 
 	testCases := []struct {
 		name                  string

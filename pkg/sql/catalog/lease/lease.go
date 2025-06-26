@@ -1879,6 +1879,7 @@ func (m *Manager) RunBackgroundLeasingTask(ctx context.Context) {
 				return
 
 			case <-rangeFeedProgressWatchDog.C:
+				rangeFeedProgressWatchDog.Read = true
 				// Detect if the range feed has stopped making
 				// progress.
 				if rangeFeedProgressWatchDogEnabled {
@@ -1897,6 +1898,7 @@ func (m *Manager) RunBackgroundLeasingTask(ctx context.Context) {
 				m.handleRangeFeedError(ctx)
 				m.refreshSomeLeases(ctx, true /*refreshAndPurgeAllDescriptors*/)
 			case <-refreshTimer.C:
+				refreshTimer.Read = true
 				refreshTimer.Reset(getRefreshTimerDuration() / 2)
 
 				// Check for any react to any range feed availability problems, and
@@ -2052,7 +2054,7 @@ func (m *Manager) refreshSomeLeases(ctx context.Context, refreshAndPurgeAllDescr
 				if _, err := acquireNodeLease(ctx, m, id, AcquireBackground); err != nil {
 					log.Errorf(ctx, "refreshing descriptor: %d lease failed: %s", id, err)
 
-					if errors.Is(err, catalog.ErrDescriptorNotFound) {
+					if errors.Is(err, catalog.ErrDescriptorNotFound) || errors.Is(err, catalog.ErrDescriptorDropped) {
 						// Lease renewal failed due to removed descriptor; Remove this descriptor from cache.
 						if err := purgeOldVersions(
 							ctx, m.storage.db.KV(), id, true /* dropped */, 0 /* minVersion */, m,

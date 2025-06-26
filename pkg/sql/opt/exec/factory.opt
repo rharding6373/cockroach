@@ -287,7 +287,6 @@ define IndexJoin {
     ReqOrdering exec.OutputOrdering
     Locking opt.Locking
     LimitHint int64
-    Parallelize bool
 }
 
 # LookupJoin performs a lookup join.
@@ -327,7 +326,6 @@ define LookupJoin {
     LimitHint int64
     RemoteOnlyLookups bool
     ReverseScans bool
-    Parallelize bool
 }
 
 # InvertedJoin performs a lookup join into an inverted index.

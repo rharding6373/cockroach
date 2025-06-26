@@ -18,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -35,12 +34,6 @@ func makeMockTxnWriteBuffer(st *cluster.Settings) (txnWriteBuffer, *mockLockedSe
 		txnMetrics: &metrics,
 		st:         st,
 	}, mockSender
-}
-
-func getArgs(key roachpb.Key) *kvpb.GetRequest {
-	return &kvpb.GetRequest{
-		RequestHeader: kvpb.RequestHeader{Key: key},
-	}
 }
 
 func putArgs(key roachpb.Key, value string, seq enginepb.TxnSeq) *kvpb.PutRequest {
@@ -639,7 +632,6 @@ func TestTxnWriteBufferServesPointReadsLocally(t *testing.T) {
 	// Perform a read on keyC. This should be sent to the KV layer, as no write
 	// for this key has been buffered.
 	ba = &kvpb.BatchRequest{}
-	ba.Header = kvpb.Header{Txn: &txn}
 	getC := &kvpb.GetRequest{RequestHeader: kvpb.RequestHeader{Key: keyC}}
 	ba.Add(getC)
 
@@ -763,7 +755,6 @@ func TestTxnWriteBufferServesPointReadsAfterScan(t *testing.T) {
 
 	// Perform a read on keyC.
 	ba = &kvpb.BatchRequest{}
-	ba.Header = kvpb.Header{Txn: &txn}
 	getC := &kvpb.GetRequest{RequestHeader: kvpb.RequestHeader{Key: keyC, Sequence: txn.Sequence}}
 	ba.Add(getC)
 
@@ -1142,9 +1133,8 @@ func TestTxnWriteBufferDecomposesConditionalPuts(t *testing.T) {
 			require.Equal(t, keyA, getReq.Key)
 			require.Equal(t, txn.Sequence, getReq.Sequence)
 			require.Equal(t, lock.Exclusive, getReq.KeyLockingStrength)
-			br := ba.CreateReply()
-			br.Txn = ba.Txn
-			return br, nil
+
+			return ba.CreateReply(), nil
 		})
 
 		br, pErr := twb.SendLocked(ctx, ba)
@@ -1218,9 +1208,7 @@ func TestTxnWriteBufferDecomposesConditionalPutsExpectingNoRow(t *testing.T) {
 		require.Equal(t, txn.Sequence, getReq.Sequence)
 		require.Equal(t, lock.Exclusive, getReq.KeyLockingStrength)
 		require.True(t, getReq.LockNonExisting)
-		br := ba.CreateReply()
-		br.Txn = ba.Txn
-		return br, nil
+		return ba.CreateReply(), nil
 	})
 
 	br, pErr := twb.SendLocked(ctx, ba)
@@ -1290,9 +1278,7 @@ func TestTxnWriteBufferRespectsMustAcquireExclusiveLock(t *testing.T) {
 		require.Equal(t, txn.Sequence, getReq.Sequence)
 		require.Equal(t, lock.Exclusive, getReq.KeyLockingStrength)
 		require.True(t, getReq.LockNonExisting)
-		br := ba.CreateReply()
-		br.Txn = ba.Txn
-		return br, nil
+		return ba.CreateReply(), nil
 	})
 
 	br, pErr := twb.SendLocked(ctx, ba)
@@ -1373,7 +1359,6 @@ func TestTxnWriteBufferMustSortBatchesBySequenceNumber(t *testing.T) {
 			}
 		}
 		br = ba.CreateReply()
-		br.Txn = ba.Txn
 		return br, nil
 	})
 
@@ -1406,23 +1391,17 @@ func TestTxnWriteBufferEstimateSize(t *testing.T) {
 	putA := putArgs(keyA, valAStr, txn.Sequence)
 	ba.Add(putA)
 
-	expectedUnlockedPutSize := int64(len(keyA)+len(valA.RawBytes)) + bufferedWriteStructOverhead + bufferedValueStructOverhead
-	require.Equal(t, expectedUnlockedPutSize, twb.estimateSize(ba))
-
-	ba = &kvpb.BatchRequest{}
-	ba.Header = kvpb.Header{Txn: &txn}
-	putA = putArgs(keyA, valAStr, txn.Sequence)
-	putA.MustAcquireExclusiveLock = true
-	ba.Add(putA)
-
-	require.Equal(t, expectedUnlockedPutSize+lockKeyInfoSize, twb.estimateSize(ba))
+	require.Equal(t,
+		int64(len(keyA)+len(valA.RawBytes))+bufferedWriteStructOverhead+bufferedValueStructOverhead,
+		twb.estimateSize(ba),
+	)
 
 	ba = &kvpb.BatchRequest{}
 	cputLarge := cputArgs(keyLarge, valLargeStr, "", txn.Sequence)
 	ba.Add(cputLarge)
 
 	require.Equal(t,
-		int64(len(keyLarge)+len(valLarge.RawBytes))+bufferedWriteStructOverhead+bufferedValueStructOverhead+lockKeyInfoSize,
+		int64(len(keyLarge)+len(valLarge.RawBytes))+bufferedWriteStructOverhead+bufferedValueStructOverhead,
 		twb.estimateSize(ba),
 	)
 
@@ -1432,15 +1411,10 @@ func TestTxnWriteBufferEstimateSize(t *testing.T) {
 
 	// NB: note that we're overcounting here, as we're deleting a key that's
 	// already present in the buffer. But that's what estimating is about.
-	expectedUnlockedDelSize := int64(len(keyA)) + bufferedWriteStructOverhead + bufferedValueStructOverhead
-	require.Equal(t, expectedUnlockedDelSize, twb.estimateSize(ba))
-
-	ba = &kvpb.BatchRequest{}
-	delA = delArgs(keyA, txn.Sequence)
-	delA.MustAcquireExclusiveLock = true
-	ba.Add(delA)
-
-	require.Equal(t, expectedUnlockedDelSize+lockKeyInfoSize, twb.estimateSize(ba))
+	require.Equal(t,
+		int64(len(keyA))+bufferedWriteStructOverhead+bufferedValueStructOverhead,
+		twb.estimateSize(ba),
+	)
 }
 
 // TestTxnWriteBufferFlushesWhenOverBudget verifies that the txnWriteBuffer
@@ -1561,164 +1535,118 @@ func TestTxnWriteBufferFlushesWhenOverBudget(t *testing.T) {
 	require.Equal(t, int64(1), twb.txnMetrics.TxnWriteBufferMemoryLimitExceeded.Count())
 }
 
-// TestTxnWriteBufferFlushesIfBatchRequiresFlushing ensures that the
-// txnWriteBuffer correctly handles requests that aren't currently
-// supported by the txnWriteBuffer by flushing the buffer before
-// processing the request.
-func TestTxnWriteBufferFlushesIfBatchRequiresFlushing(t *testing.T) {
+// TestTxnWriteBufferDeleteRange ensures that the txnWriteBuffer correctly
+// handles DeleteRange requests. In particular, whenever we see a batch with a
+// DeleteRange request, the write buffer is flushed and write buffering is
+// turned off for subsequent requests.
+func TestTxnWriteBufferDeleteRange(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
+	twb, mockSender := makeMockTxnWriteBuffer(cluster.MakeClusterSettings())
+
+	txn := makeTxnProto()
+	txn.Sequence = 10
 	keyA, keyB, keyC := roachpb.Key("a"), roachpb.Key("b"), roachpb.Key("c")
 	valA := "valA"
 
-	type batchSendMock func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error)
-	type testCase struct {
-		name         string
-		ba           func(*kvpb.BatchRequest)
-		baSender     func(*testing.T) batchSendMock
-		validateResp func(*testing.T, *kvpb.BatchResponse, *kvpb.Error)
+	ba := &kvpb.BatchRequest{}
+	ba.Header = kvpb.Header{Txn: &txn}
+	putA := putArgs(keyA, valA, txn.Sequence)
+	delC := delArgs(keyC, txn.Sequence)
+	ba.Add(putA)
+	ba.Add(delC)
+
+	numCalled := mockSender.NumCalled()
+	br, pErr := twb.SendLocked(ctx, ba)
+	require.Nil(t, pErr)
+	require.NotNil(t, br)
+	// All the requests should be buffered and not make it past the
+	// txnWriteBuffer. The response returned should be indistinguishable.
+	require.Equal(t, numCalled, mockSender.NumCalled())
+	require.Len(t, br.Responses, 2)
+	require.IsType(t, &kvpb.PutResponse{}, br.Responses[0].GetInner())
+	// Verify the Put was buffered correctly.
+	expBufferedWrites := []bufferedWrite{
+		makeBufferedWrite(keyA, makeBufferedValue("valA", 10)),
+		makeBufferedWrite(keyC, makeBufferedValue("", 10)),
 	}
+	require.Equal(t, expBufferedWrites, twb.testingBufferedWritesAsSlice())
 
-	testCases := []testCase{
-		{
-			name: "DeleteRange",
-			ba: func(b *kvpb.BatchRequest) {
-				b.Add(delRangeArgs(keyA, keyB, b.Txn.Sequence))
-			},
-			baSender: func(t *testing.T) batchSendMock {
-				return func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-					require.Len(t, ba.Requests, 3)
-					require.IsType(t, &kvpb.PutRequest{}, ba.Requests[0].GetInner())
-					require.IsType(t, &kvpb.DeleteRequest{}, ba.Requests[1].GetInner())
-					require.IsType(t, &kvpb.DeleteRangeRequest{}, ba.Requests[2].GetInner())
+	// Send a DeleteRange request. This should result in the entire buffer
+	// being flushed. Note that we're flushing the delete to key C as well, even
+	// though it doesn't overlap with the DeleteRange request.
+	ba = &kvpb.BatchRequest{}
+	ba.Header = kvpb.Header{Txn: &txn}
+	delRange := delRangeArgs(keyA, keyB, txn.Sequence)
+	ba.Add(delRange)
 
-					br := ba.CreateReply()
-					br.Txn = ba.Txn
-					return br, nil
-				}
-			},
-			validateResp: func(t *testing.T, br *kvpb.BatchResponse, pErr *kvpb.Error) {
-				require.Nil(t, pErr)
-				require.NotNil(t, br)
-				require.Len(t, br.Responses, 1)
-				require.IsType(t, &kvpb.DeleteRangeResponse{}, br.Responses[0].GetInner())
-			},
-		},
-		{
-			name: "Increment",
-			ba: func(b *kvpb.BatchRequest) {
-				b.Add(&kvpb.IncrementRequest{
-					RequestHeader: kvpb.RequestHeader{Key: keyA},
-					Increment:     1,
-				})
-			},
-			baSender: func(t *testing.T) batchSendMock {
-				return func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-					require.Len(t, ba.Requests, 3)
-					require.IsType(t, &kvpb.PutRequest{}, ba.Requests[0].GetInner())
-					require.IsType(t, &kvpb.DeleteRequest{}, ba.Requests[1].GetInner())
-					require.IsType(t, &kvpb.IncrementRequest{}, ba.Requests[2].GetInner())
+	mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
+		require.Len(t, ba.Requests, 3)
 
-					br := ba.CreateReply()
-					br.Txn = ba.Txn
-					return br, nil
-				}
-			},
-			validateResp: func(t *testing.T, br *kvpb.BatchResponse, pErr *kvpb.Error) {
-				require.Nil(t, pErr)
-				require.NotNil(t, br)
-				require.Len(t, br.Responses, 1)
-				require.IsType(t, &kvpb.IncrementResponse{}, br.Responses[0].GetInner())
-			},
-		},
-	}
+		require.IsType(t, &kvpb.PutRequest{}, ba.Requests[0].GetInner())
+		require.IsType(t, &kvpb.DeleteRequest{}, ba.Requests[1].GetInner())
+		require.IsType(t, &kvpb.DeleteRangeRequest{}, ba.Requests[2].GetInner())
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			twb, mockSender := makeMockTxnWriteBuffer(cluster.MakeClusterSettings())
+		br = ba.CreateReply()
+		br.Txn = ba.Txn
+		return br, nil
+	})
 
-			txn := makeTxnProto()
-			txn.Sequence = 10
-			ba := &kvpb.BatchRequest{}
-			ba.Header = kvpb.Header{Txn: &txn}
-			putA := putArgs(keyA, valA, txn.Sequence)
-			delC := delArgs(keyC, txn.Sequence)
-			ba.Add(putA)
-			ba.Add(delC)
+	br, pErr = twb.SendLocked(ctx, ba)
+	require.Nil(t, pErr)
+	require.NotNil(t, br)
+	// Even though we flushed some writes, it shouldn't make it back to the response.
+	require.Len(t, br.Responses, 1)
+	require.IsType(t, &kvpb.DeleteRangeResponse{}, br.Responses[0].GetInner())
+	require.Equal(t, int64(1), twb.txnMetrics.TxnWriteBufferDisabledAfterBuffering.Count())
 
-			numCalled := mockSender.NumCalled()
-			br, pErr := twb.SendLocked(ctx, ba)
-			require.Nil(t, pErr)
-			require.NotNil(t, br)
-			// All the requests should be buffered and not make it past the
-			// txnWriteBuffer. The response returned should be indistinguishable.
-			require.Equal(t, numCalled, mockSender.NumCalled())
-			require.Len(t, br.Responses, 2)
-			require.IsType(t, &kvpb.PutResponse{}, br.Responses[0].GetInner())
-			// Verify the Put was buffered correctly.
-			expBufferedWrites := []bufferedWrite{
-				makeBufferedWrite(keyA, makeBufferedValue("valA", 10)),
-				makeBufferedWrite(keyC, makeBufferedValue("", 10)),
-			}
-			require.Equal(t, expBufferedWrites, twb.testingBufferedWritesAsSlice())
+	// Ensure the buffer is empty at this point.
+	require.Equal(t, 0, len(twb.testingBufferedWritesAsSlice()))
 
-			// Send the batch that should require a flush
-			ba = &kvpb.BatchRequest{}
-			ba.Header = kvpb.Header{Txn: &txn}
-			tc.ba(ba)
-			mockSender.MockSend(tc.baSender(t))
-			br, pErr = twb.SendLocked(ctx, ba)
-			tc.validateResp(t, br, pErr)
-			// Ensure the buffer is empty at this point.
-			require.Equal(t, 0, len(twb.testingBufferedWritesAsSlice()))
-			require.Equal(t, int64(1), twb.txnMetrics.TxnWriteBufferDisabledAfterBuffering.Count())
+	// Subsequent batches should not be buffered.
+	ba = &kvpb.BatchRequest{}
+	ba.Header = kvpb.Header{Txn: &txn}
+	putC := putArgs(keyC, valA, txn.Sequence)
+	ba.Add(putC)
 
-			// Subsequent batches should not be buffered.
-			ba = &kvpb.BatchRequest{}
-			ba.Header = kvpb.Header{Txn: &txn}
-			putC := putArgs(keyC, valA, txn.Sequence)
-			ba.Add(putC)
+	mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
+		require.Len(t, ba.Requests, 1)
 
-			mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-				require.Len(t, ba.Requests, 1)
+		require.IsType(t, &kvpb.PutRequest{}, ba.Requests[0].GetInner())
 
-				require.IsType(t, &kvpb.PutRequest{}, ba.Requests[0].GetInner())
+		br = ba.CreateReply()
+		br.Txn = ba.Txn
+		return br, nil
+	})
 
-				br = ba.CreateReply()
-				br.Txn = ba.Txn
-				return br, nil
-			})
+	br, pErr = twb.SendLocked(ctx, ba)
+	require.Nil(t, pErr)
+	require.NotNil(t, br)
+	require.Len(t, br.Responses, 1)
+	require.IsType(t, &kvpb.PutResponse{}, br.Responses[0].GetInner())
 
-			br, pErr = twb.SendLocked(ctx, ba)
-			require.Nil(t, pErr)
-			require.NotNil(t, br)
-			require.Len(t, br.Responses, 1)
-			require.IsType(t, &kvpb.PutResponse{}, br.Responses[0].GetInner())
+	// Commit the transaction. We flushed the buffer already, and no subsequent
+	// writes were buffered, so the buffer should be empty. As such, no write
+	// requests should be added to the batch.
+	ba = &kvpb.BatchRequest{}
+	ba.Header = kvpb.Header{Txn: &txn}
+	ba.Add(&kvpb.EndTxnRequest{Commit: true})
 
-			// Commit the transaction. We flushed the buffer already, and no subsequent
-			// writes were buffered, so the buffer should be empty. As such, no write
-			// requests should be added to the batch.
-			ba = &kvpb.BatchRequest{}
-			ba.Header = kvpb.Header{Txn: &txn}
-			ba.Add(&kvpb.EndTxnRequest{Commit: true})
+	mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
+		require.Len(t, ba.Requests, 1)
+		require.IsType(t, &kvpb.EndTxnRequest{}, ba.Requests[0].GetInner())
 
-			mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-				require.Len(t, ba.Requests, 1)
-				require.IsType(t, &kvpb.EndTxnRequest{}, ba.Requests[0].GetInner())
+		br = ba.CreateReply()
+		br.Txn = ba.Txn
+		return br, nil
+	})
 
-				br = ba.CreateReply()
-				br.Txn = ba.Txn
-				return br, nil
-			})
-
-			br, pErr = twb.SendLocked(ctx, ba)
-			require.Nil(t, pErr)
-			require.NotNil(t, br)
-			require.Len(t, br.Responses, 1)
-			require.IsType(t, &kvpb.EndTxnResponse{}, br.Responses[0].GetInner())
-		})
-	}
+	br, pErr = twb.SendLocked(ctx, ba)
+	require.Nil(t, pErr)
+	require.NotNil(t, br)
+	require.Len(t, br.Responses, 1)
+	require.IsType(t, &kvpb.EndTxnResponse{}, br.Responses[0].GetInner())
 }
 
 // TestTxnWriteBufferRollbackToSavepoint tests the savepoint rollback logic.
@@ -1751,7 +1679,7 @@ func TestTxnWriteBufferRollbackToSavepoint(t *testing.T) {
 	require.Len(t, br.Responses, 2)
 	require.IsType(t, &kvpb.PutResponse{}, br.Responses[0].GetInner())
 	require.IsType(t, &kvpb.DeleteResponse{}, br.Responses[1].GetInner())
-	// Verify the
+	// Verify the state of the write buffer.
 	expBufferedWrites := []bufferedWrite{
 		makeBufferedWrite(keyA, makeBufferedValue("valA", 10)),
 		makeBufferedWrite(keyC, makeBufferedValue("", 11)),
@@ -1764,7 +1692,6 @@ func TestTxnWriteBufferRollbackToSavepoint(t *testing.T) {
 
 	// Add some new writes. A second write to keyA and a new one to keyB.
 	ba = &kvpb.BatchRequest{}
-	ba.Header = kvpb.Header{Txn: &txn}
 	txn.Sequence++
 	putA2 := putArgs(keyA, valA2, txn.Sequence)
 	ba.Add(putA2)
@@ -1797,6 +1724,13 @@ func TestTxnWriteBufferRollbackToSavepoint(t *testing.T) {
 		makeBufferedWrite(keyA, makeBufferedValue("valA", 10)),
 	}
 	require.Equal(t, expBufferedWrites, twb.testingBufferedWritesAsSlice())
+	// Additionally ensure that we don't have a leak of rolled back writes.
+	{
+		bw := twb.testingBufferedWritesAsSlice()[0]
+		require.Greaterf(t, cap(bw.vals), 1, "should have kept the capacity of the slice")
+		vals := bw.vals[:cap(bw.vals)]
+		require.Equalf(t, bufferedValue{}, vals[1], "should have lost reference to the rolled back value")
+	}
 
 	// Commit the transaction.
 	ba = &kvpb.BatchRequest{}
@@ -1818,174 +1752,6 @@ func TestTxnWriteBufferRollbackToSavepoint(t *testing.T) {
 	require.NotNil(t, br)
 	require.Len(t, br.Responses, 1)
 	require.IsType(t, &kvpb.EndTxnResponse{}, br.Responses[0].GetInner())
-}
-
-// TestRollbackNeverHeldLock is a regression test for a bug around incorrect
-// accounting of the buffer size for completely unlocked writes that were rolled
-// back.
-func TestRollbackNeverHeldLock(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-	twb, mockSender := makeMockTxnWriteBuffer(cluster.MakeClusterSettings())
-
-	txn := makeTxnProto()
-	txn.Sequence = 10
-	txn.Sequence++
-	sp := &savepoint{seqNum: txn.Sequence}
-	twb.createSavepointLocked(ctx, sp)
-
-	txn.Sequence++
-	ba := &kvpb.BatchRequest{Header: kvpb.Header{Txn: &txn}}
-	ba.Add(delArgs(roachpb.Key("a"), txn.Sequence))
-
-	br, pErr := twb.SendLocked(ctx, ba)
-	require.Nil(t, pErr)
-	require.NotNil(t, br)
-
-	twb.rollbackToSavepointLocked(ctx, *sp)
-
-	// Commit the transaction.
-	ba = &kvpb.BatchRequest{Header: kvpb.Header{Txn: &txn}}
-	ba.Add(&kvpb.EndTxnRequest{Commit: true})
-
-	mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-		require.Len(t, ba.Requests, 1)
-		br = ba.CreateReply()
-		br.Txn = ba.Txn
-		return br, nil
-	})
-
-	br, pErr = twb.SendLocked(ctx, ba)
-	require.Nil(t, pErr)
-	require.NotNil(t, br)
-}
-
-// TestTxnWriteBufferRollbackToSavepointMidTxn tests the savepoint rollback
-// logic in the presence of explicit savepoints.
-func TestTxnWriteBufferRollbackToSavepointMidTxn(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-
-	sendPut := func(t *testing.T, twb *txnWriteBuffer, mockSender *mockLockedSender, txn *roachpb.Transaction) {
-		txn.Sequence++
-		keyA := roachpb.Key("a")
-		valA := fmt.Sprintf("valA@%d", txn.Sequence)
-		putA := putArgs(keyA, valA, txn.Sequence)
-
-		ba := &kvpb.BatchRequest{}
-		ba.Header = kvpb.Header{Txn: txn}
-		ba.Add(putA)
-
-		mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-			br := ba.CreateReply()
-			br.Txn = ba.Txn
-			return br, nil
-		})
-
-		numCalled := mockSender.NumCalled()
-		br, pErr := twb.SendLocked(ctx, ba)
-		require.Nil(t, pErr)
-		require.NotNil(t, br)
-		require.Equal(t, numCalled, mockSender.NumCalled())
-	}
-
-	delRangeBatch := func(txn *roachpb.Transaction) *kvpb.BatchRequest {
-		txn.Sequence++
-		keyB := roachpb.Key("b")
-		keyC := roachpb.Key("c")
-		delRangeReq := delRangeArgs(keyB, keyC, txn.Sequence)
-
-		ba := &kvpb.BatchRequest{}
-		ba.Header = kvpb.Header{Txn: txn}
-		ba.Add(delRangeReq)
-		return ba
-	}
-
-	savepoint := func(twb *txnWriteBuffer, txn *roachpb.Transaction) *savepoint {
-		txn.Sequence++
-		savepoint := &savepoint{seqNum: txn.Sequence}
-		twb.createSavepointLocked(ctx, savepoint)
-		return savepoint
-	}
-
-	t.Run("flush with no savepoint sends latest", func(t *testing.T) {
-		twb, mockSender := makeMockTxnWriteBuffer(cluster.MakeClusterSettings())
-		txn := makeTxnProto()
-		// Send 4 requests to the buffer
-		sendPut(t, &twb, mockSender, &txn)
-		sendPut(t, &twb, mockSender, &txn)
-		sendPut(t, &twb, mockSender, &txn)
-		sendPut(t, &twb, mockSender, &txn)
-		ba := delRangeBatch(&txn)
-
-		// Expect 1 Put and 1 DelRange.
-		mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-			require.Len(t, ba.Requests, 2)
-			require.IsType(t, &kvpb.PutRequest{}, ba.Requests[0].GetInner())
-			require.IsType(t, &kvpb.DeleteRangeRequest{}, ba.Requests[1].GetInner())
-
-			br := ba.CreateReply()
-			br.Txn = ba.Txn
-			return br, nil
-		})
-		br, pErr := twb.SendLocked(ctx, ba)
-		require.Nil(t, pErr)
-		require.NotNil(t, br)
-	})
-
-	t.Run("flush with savepoint still elides unnecessary writes under savepoint", func(t *testing.T) {
-		twb, mockSender := makeMockTxnWriteBuffer(cluster.MakeClusterSettings())
-		txn := makeTxnProto()
-		sendPut(t, &twb, mockSender, &txn) // should be elided
-		sendPut(t, &twb, mockSender, &txn)
-		_ = savepoint(&twb, &txn)
-		sendPut(t, &twb, mockSender, &txn)
-		sendPut(t, &twb, mockSender, &txn)
-		ba := delRangeBatch(&txn)
-
-		// Expect 3 Put and 1 DelRange.
-		mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-			require.Len(t, ba.Requests, 4)
-			require.IsType(t, &kvpb.PutRequest{}, ba.Requests[0].GetInner())
-			require.IsType(t, &kvpb.PutRequest{}, ba.Requests[1].GetInner())
-			require.IsType(t, &kvpb.PutRequest{}, ba.Requests[2].GetInner())
-			require.IsType(t, &kvpb.DeleteRangeRequest{}, ba.Requests[3].GetInner())
-
-			br := ba.CreateReply()
-			br.Txn = ba.Txn
-			return br, nil
-		})
-		br, pErr := twb.SendLocked(ctx, ba)
-		require.Nil(t, pErr)
-		require.NotNil(t, br)
-	})
-
-	t.Run("flush after release of earliest savepoint only sends latest", func(t *testing.T) {
-		twb, mockSender := makeMockTxnWriteBuffer(cluster.MakeClusterSettings())
-		txn := makeTxnProto()
-		sendPut(t, &twb, mockSender, &txn)
-		sendPut(t, &twb, mockSender, &txn)
-		sendPut(t, &twb, mockSender, &txn)
-		sp := savepoint(&twb, &txn)
-		sendPut(t, &twb, mockSender, &txn)
-		twb.releaseSavepointLocked(ctx, sp)
-
-		ba := delRangeBatch(&txn)
-		mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-			require.Len(t, ba.Requests, 2)
-			require.IsType(t, &kvpb.PutRequest{}, ba.Requests[0].GetInner())
-			require.IsType(t, &kvpb.DeleteRangeRequest{}, ba.Requests[1].GetInner())
-
-			br := ba.CreateReply()
-			br.Txn = ba.Txn
-			return br, nil
-		})
-		br, pErr := twb.SendLocked(ctx, ba)
-		require.Nil(t, pErr)
-		require.NotNil(t, br)
-	})
 }
 
 // TestTxnWriteBufferFlushesAfterDisabling verifies that the txnWriteBuffer
@@ -2149,7 +1915,7 @@ func TestTxnWriteBufferBatchRequestValidation(t *testing.T) {
 
 	tests := []testCase{
 		{
-			name: "batch with OriginTimestamp in WriteOptions",
+			name: "batch with OriginTimestamp",
 			ba: func() *kvpb.BatchRequest {
 				header := kvpb.Header{
 					Txn: &txn,
@@ -2161,7 +1927,7 @@ func TestTxnWriteBufferBatchRequestValidation(t *testing.T) {
 			},
 		},
 		{
-			name: "batch with OriginID in WriteOptions",
+			name: "batch with OriginID",
 			ba: func() *kvpb.BatchRequest {
 				header := kvpb.Header{
 					Txn: &txn,
@@ -2173,16 +1939,23 @@ func TestTxnWriteBufferBatchRequestValidation(t *testing.T) {
 			},
 		},
 		{
-			name: "batch with OriginTimestamp in ConditionalPutRequest",
+			name: "batch with InitPut",
 			ba: func() *kvpb.BatchRequest {
-				header := kvpb.Header{
-					Txn: &txn,
-				}
-				b := &kvpb.BatchRequest{Header: header}
-				r := &kvpb.ConditionalPutRequest{
-					OriginTimestamp: hlc.Timestamp{WallTime: 1},
-				}
-				b.Add(r)
+				b := &kvpb.BatchRequest{Header: kvpb.Header{Txn: &txn}}
+				b.Add(&kvpb.InitPutRequest{
+					RequestHeader: kvpb.RequestHeader{Key: keyA, Sequence: txn.Sequence},
+					Value:         roachpb.Value{},
+				})
+				return b
+			},
+		},
+		{
+			name: "batch with Increment",
+			ba: func() *kvpb.BatchRequest {
+				b := &kvpb.BatchRequest{Header: kvpb.Header{Txn: &txn}}
+				b.Add(&kvpb.IncrementRequest{
+					RequestHeader: kvpb.RequestHeader{Key: keyA, Sequence: txn.Sequence},
+				})
 				return b
 			},
 		},
@@ -2246,15 +2019,6 @@ func TestTxnWriteBufferBatchRequestValidation(t *testing.T) {
 				return b
 			},
 		},
-		{
-			name: "batch with unsupported request",
-			ba: func() *kvpb.BatchRequest {
-				b := &kvpb.BatchRequest{Header: kvpb.Header{Txn: &txn}}
-				r := &kvpb.TruncateLogRequest{}
-				b.Add(r)
-				return b
-			},
-		},
 	}
 
 	for _, tc := range tests {
@@ -2265,942 +2029,5 @@ func TestTxnWriteBufferBatchRequestValidation(t *testing.T) {
 			require.Equal(t, numCalledBefore, mockSender.NumCalled())
 
 		})
-	}
-}
-
-// TestTxnWriteBufferHasBufferedAllPrecedingWrites verifies that the
-// txnWriteBuffer correctly sets the HasBufferedAllPrecedingWrites flag.
-func TestTxnWriteBufferHasBufferedAllPrecedingWrites(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	txn := makeTxnProto()
-	txn.Sequence = 1
-	keyA, keyB, keyC := roachpb.Key("a"), roachpb.Key("b"), roachpb.Key("c")
-
-	for _, tc := range []struct {
-		name                             string
-		setup                            func(*txnWriteBuffer)
-		ba                               func(ba *kvpb.BatchRequest)
-		mockSend                         func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error)
-		expHasBufferedAllPrecedingWrites bool
-	}{
-		{
-			name: "batch with two Get requests",
-			ba: func(ba *kvpb.BatchRequest) {
-				getA := &kvpb.GetRequest{RequestHeader: kvpb.RequestHeader{Key: keyA, Sequence: txn.Sequence}}
-				getB := &kvpb.GetRequest{RequestHeader: kvpb.RequestHeader{Key: keyB, Sequence: txn.Sequence}}
-				ba.Add(getA, getB)
-			},
-			mockSend: func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-				require.Len(t, ba.Requests, 2)
-				require.IsType(t, &kvpb.GetRequest{}, ba.Requests[0].GetInner())
-				require.IsType(t, &kvpb.GetRequest{}, ba.Requests[1].GetInner())
-
-				require.True(t, ba.HasBufferedAllPrecedingWrites)
-
-				br := ba.CreateReply()
-				br.Txn = ba.Txn
-				return br, nil
-			},
-			expHasBufferedAllPrecedingWrites: true,
-		},
-		{
-			name: "batch with one Put and one Get request",
-			ba: func(ba *kvpb.BatchRequest) {
-				putA := putArgs(keyA, "valA", txn.Sequence)
-				getB := &kvpb.GetRequest{RequestHeader: kvpb.RequestHeader{Key: keyB, Sequence: txn.Sequence}}
-				ba.Add(putA, getB)
-			},
-			mockSend: func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-				require.Len(t, ba.Requests, 1)
-				require.IsType(t, &kvpb.GetRequest{}, ba.Requests[0].GetInner())
-
-				require.True(t, ba.HasBufferedAllPrecedingWrites)
-
-				br := ba.CreateReply()
-				br.Txn = ba.Txn
-				return br, nil
-			},
-			expHasBufferedAllPrecedingWrites: true,
-		},
-		{
-			name: "batch with one Put, one Get, and one Delete request",
-			ba: func(ba *kvpb.BatchRequest) {
-				putA := putArgs(keyA, "valA", txn.Sequence)
-				getB := &kvpb.GetRequest{RequestHeader: kvpb.RequestHeader{Key: keyB, Sequence: txn.Sequence}}
-				delC := delArgs(keyC, txn.Sequence)
-
-				ba.Add(putA, getB, delC)
-			},
-			mockSend: func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-				require.Len(t, ba.Requests, 1)
-				require.IsType(t, &kvpb.GetRequest{}, ba.Requests[0].GetInner())
-
-				require.True(t, ba.HasBufferedAllPrecedingWrites)
-
-				br := ba.CreateReply()
-				br.Txn = ba.Txn
-				return br, nil
-			},
-			expHasBufferedAllPrecedingWrites: true,
-		},
-		{
-			name: "batch with one DeleteRange and one Get request",
-			ba: func(ba *kvpb.BatchRequest) {
-				delRange := delRangeArgs(keyA, keyB, txn.Sequence)
-				getB := &kvpb.GetRequest{RequestHeader: kvpb.RequestHeader{Key: keyB, Sequence: txn.Sequence}}
-
-				ba.Add(delRange, getB)
-			},
-			mockSend: func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-				require.Len(t, ba.Requests, 2)
-				require.IsType(t, &kvpb.DeleteRangeRequest{}, ba.Requests[0].GetInner())
-				require.IsType(t, &kvpb.GetRequest{}, ba.Requests[1].GetInner())
-
-				require.True(t, ba.HasBufferedAllPrecedingWrites)
-
-				br := ba.CreateReply()
-				br.Txn = ba.Txn
-				return br, nil
-			},
-			expHasBufferedAllPrecedingWrites: false,
-		},
-		{
-			name: "flushed due to size limit",
-			setup: func(twb *txnWriteBuffer) {
-				bufferedWritesMaxBufferSize.Override(context.Background(), &twb.st.SV, 1)
-			},
-			ba: func(ba *kvpb.BatchRequest) {
-				putA := putArgs(keyA, "valA", txn.Sequence)
-
-				ba.Add(putA)
-			},
-			mockSend: func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-				require.Len(t, ba.Requests, 1)
-				require.IsType(t, &kvpb.PutRequest{}, ba.Requests[0].GetInner())
-
-				require.True(t, ba.HasBufferedAllPrecedingWrites)
-
-				br := ba.CreateReply()
-				br.Txn = ba.Txn
-				return br, nil
-			},
-			expHasBufferedAllPrecedingWrites: false,
-		},
-		{
-			name: "write buffering disabled",
-			setup: func(twb *txnWriteBuffer) {
-				twb.setEnabled(false)
-			},
-			ba: func(ba *kvpb.BatchRequest) {
-				putA := putArgs(keyA, "valA", txn.Sequence)
-
-				ba.Add(putA)
-			},
-			mockSend: func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-				require.Len(t, ba.Requests, 1)
-				require.IsType(t, &kvpb.PutRequest{}, ba.Requests[0].GetInner())
-
-				// NB: Should never be set if write buffering is disabled
-				require.False(t, ba.HasBufferedAllPrecedingWrites)
-
-				br := ba.CreateReply()
-				br.Txn = ba.Txn
-				return br, nil
-			},
-			expHasBufferedAllPrecedingWrites: false,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			st := cluster.MakeTestingClusterSettings()
-			twb, mockSender := makeMockTxnWriteBuffer(st)
-
-			if tc.setup != nil {
-				tc.setup(&twb)
-			}
-
-			ba := &kvpb.BatchRequest{Header: kvpb.Header{Txn: &txn}}
-			tc.ba(ba)
-			mockSender.MockSend(tc.mockSend)
-
-			br, pErr := twb.SendLocked(ctx, ba)
-			require.Nil(t, pErr)
-			require.NotNil(t, br)
-
-			// Go to commit the transaction and ensure HasBufferedAllPrecedingWrites
-			// is set correctly.
-			mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-				require.Equal(t, tc.expHasBufferedAllPrecedingWrites, ba.HasBufferedAllPrecedingWrites)
-
-				br = ba.CreateReply()
-				br.Txn = ba.Txn
-				return br, nil
-			})
-
-			ba = &kvpb.BatchRequest{}
-			ba.Header = kvpb.Header{Txn: &txn}
-			ba.Add(&kvpb.EndTxnRequest{Commit: true})
-
-			br, pErr = twb.SendLocked(ctx, ba)
-			require.Nil(t, pErr)
-			require.NotNil(t, br)
-			require.Len(t, br.Responses, 1)
-			require.IsType(t, &kvpb.EndTxnResponse{}, br.Responses[0].GetInner())
-		})
-	}
-}
-
-// BenchmarkTxnWriteBuffer benchmarks the txnWriteBuffer. The test sets up a
-// transaction with an existing buffer and runs a single batch through
-// SendLocked and flushBufferAndSendBatch. The test varies the state of the
-// buffer, the size of the keys and values, the fraction of reads in the batch,
-// as well as the fraction of  reads served from the buffer.
-// TODO(mira): Should we test more cases?
-//   - Batches with requests other than Get and Put. Notably, CPut.
-//   - Batches that exercise error paths.
-func BenchmarkTxnWriteBuffer(b *testing.B) {
-	defer leaktest.AfterTest(b)()
-	ctx := context.Background()
-
-	makeKey := func(i int, kvSize int) roachpb.Key {
-		// The keys are kvSize bytes.
-		keyPrefix := strings.Repeat("a", kvSize-1)
-		return roachpb.Key(fmt.Sprintf("%s%d", keyPrefix, i))
-	}
-	makeValue := func(kvSize int) string {
-		// The values are kvSize KiB.
-		return strings.Repeat("a", kvSize*1024)
-	}
-	makeBuffer := func(kvSize int, txn *roachpb.Transaction, numWrites int) txnWriteBuffer {
-		twb, mockSender := makeMockTxnWriteBuffer(cluster.MakeClusterSettings())
-		twb.setEnabled(true)
-		sendFunc := func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-			br := ba.CreateReply()
-			br.Txn = ba.Txn
-			var resps []kvpb.ResponseUnion
-			resp := kvpb.ResponseUnion{}
-			// All requests get responses. Gets also have a return value.
-			for _, req := range ba.Requests {
-				switch req.GetInner().(type) {
-				case *kvpb.GetRequest:
-					resp.Value = &kvpb.ResponseUnion_Get{
-						Get: &kvpb.GetResponse{
-							Value: &roachpb.Value{RawBytes: []byte(makeValue(kvSize))},
-						},
-					}
-				}
-				resps = append(resps, resp)
-			}
-			br.Responses = resps
-			return br, nil
-		}
-		mockSender.MockSend(sendFunc)
-
-		ba := &kvpb.BatchRequest{}
-		ba.Header = kvpb.Header{Txn: txn}
-		// Write to the keys that will later be served from the buffer but
-		// not from the benchmarked batch.
-		for i := 0; i < numWrites; i++ {
-			ba.Add(putArgs(makeKey(i, kvSize), makeValue(kvSize), enginepb.TxnSeq(i)))
-		}
-		_, pErr := twb.SendLocked(ctx, ba)
-		if pErr != nil {
-			b.Fatal(pErr)
-		}
-		return twb
-	}
-
-	numRequests := 100
-	// A size X denotes a key of size X bytes and a value of size X KiB. We don't
-	// want these to push the buffer past its max size. There's a separate test
-	// below for handling flushing the buffer.
-	kvSizes := []int{8, 32}
-	// The fraction of reads in the benchmarked batch.
-	fractionsReads := []float64{0.0, 0.5, 1.0}
-	// The fraction of the reads in the batch to be served from the buffer.
-	fractionsFromBuffer := []float64{0.0, 0.5, 1.0}
-	// The fraction of reads served from the buffer that come from the same batch.
-	fractionsFromBufferSameBatch := []float64{0.0, 0.5, 1.0}
-	for _, kvSize := range kvSizes {
-		for _, fractionReads := range fractionsReads {
-			for _, fractionFromBuffer := range fractionsFromBuffer {
-				for _, fractionFromBufferSameBatch := range fractionsFromBufferSameBatch {
-					name := fmt.Sprintf(
-						"SendLocked/size=%v/reads=%2.2f/from_buffer=%2.2f/from_batch=%2.2f", kvSize,
-						fractionReads*100, fractionFromBuffer*100, fractionFromBufferSameBatch*100,
-					)
-					b.Run(
-						name, func(b *testing.B) {
-							// The total number of requests in the batch being benchmarked are broken down
-							// into five groups, executed in the order below.
-							// 0. Not included in the batch: previous writes by the same transaction.
-							// 1. Reads served from the buffer (same keys as 0).
-							// 2. Writes in the same transaction and the same batch.
-							// 3. Reads served from the buffer from the same batch (same keys as 2).
-							// 4. Reads not served from the buffer.
-							// 5. Writes not seen by any reads in the batch.
-							numReads := int(fractionReads * float64(numRequests))
-							numWrites := numRequests - numReads
-							readsFromBuffer := int(fractionFromBuffer * float64(numReads))
-							readsFromBufferSameBatch := int(fractionFromBufferSameBatch * float64(readsFromBuffer))
-							readsFromPrevBatch := readsFromBuffer - readsFromBufferSameBatch
-
-							// Create the benchmarked batch.
-							txn := makeTxnProto()
-							ba := &kvpb.BatchRequest{}
-							ba.Header = kvpb.Header{Txn: &txn}
-
-							// Read from the keys that were written while setting up the
-							// buffer (same transaction, previous batch).
-							for i := 0; i < readsFromPrevBatch; i++ {
-								ba.Add(getArgs(makeKey(i, kvSize)))
-							}
-							// Write and then read the keys that are served from the buffer
-							// and are in the benchmarked batch.
-							for i := readsFromPrevBatch; i < readsFromPrevBatch+readsFromBufferSameBatch; i++ {
-								// Half of these puts acquire exclusive locks.
-								args := putArgs(makeKey(i, kvSize), makeValue(kvSize), enginepb.TxnSeq(i))
-								if i%2 == 0 {
-									args.MustAcquireExclusiveLock = true
-								}
-								ba.Add(args)
-								ba.Add(getArgs(makeKey(i, kvSize)))
-							}
-							// Add any remaining reads, not served from the buffer.
-							for i := readsFromPrevBatch + readsFromBufferSameBatch; i < numReads; i++ {
-								ba.Add(getArgs(makeKey(i, kvSize)))
-							}
-							// Add any remaining writes, not observed by any reads.
-							for i := readsFromPrevBatch + readsFromBufferSameBatch; i < numWrites; i++ {
-								// Half of these puts acquire exclusive locks.
-								args := putArgs(makeKey(i, kvSize), makeValue(kvSize), enginepb.TxnSeq(i))
-								if i%2 == 0 {
-									args.MustAcquireExclusiveLock = true
-								}
-							}
-
-							b.ResetTimer()
-							for i := 0; i < b.N; i++ {
-								b.StopTimer()
-								twb := makeBuffer(kvSize, &txn, readsFromPrevBatch)
-								b.StartTimer()
-								_, pErr := twb.SendLocked(ctx, ba)
-								if pErr != nil {
-									b.Fatal(pErr)
-								}
-							}
-						},
-					)
-				}
-			}
-		}
-
-		name := fmt.Sprintf("flushBufferAndSendBatch/size=%v", kvSize)
-		b.Run(name, func(b *testing.B) {
-			// Create the benchmarked batch. It's just a single Get as we're
-			// interested in the work to flush the buffer.
-			txn := makeTxnProto()
-			ba := &kvpb.BatchRequest{}
-			ba.Header = kvpb.Header{Txn: &txn}
-			ba.Add(getArgs(makeKey(0, kvSize)))
-
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				// All requests correspond to writes that will be stored in the buffer.
-				twb := makeBuffer(kvSize, &txn, numRequests)
-				twb.flushOnNextBatch = true
-				_, pErr := twb.flushBufferAndSendBatch(ctx, ba)
-				if pErr != nil {
-					b.Fatal(pErr)
-				}
-			}
-		},
-		)
-	}
-}
-
-// TestTxnWriteBufferChecksForExclusionLoss verifies that decomposed
-// writes attach an exclusion timestamp to their final batch.
-func TestTxnWriteBufferChecksForExclusionLoss(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	twb, mockSender := makeMockTxnWriteBuffer(cluster.MakeClusterSettings())
-
-	txn := makeTxnProto()
-	txn.Sequence = 10
-	keyA := roachpb.Key("a")
-	keyB := roachpb.Key("b")
-	keyC := roachpb.Key("c")
-
-	valStr := "val"
-
-	// Requests that require an exclusion timestamp:
-	//
-	// - ConditionalPut
-	// - PutMustAcquireExclusiveLock
-	// - DeleteMustAcquireExclusiveLock
-	//
-
-	ba := &kvpb.BatchRequest{}
-	ba.Header = kvpb.Header{Txn: &txn}
-	ba.Add(cputArgs(keyA, valStr, "", txn.Sequence))
-
-	putReq := putArgs(keyB, valStr, txn.Sequence)
-	putReq.MustAcquireExclusiveLock = true
-	ba.Add(putReq)
-
-	delReq := delArgs(keyC, txn.Sequence)
-	delReq.MustAcquireExclusiveLock = true
-	ba.Add(delReq)
-
-	initialReadTimestamp := txn.ReadTimestamp
-	mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-		require.Len(t, ba.Requests, 3)
-		resp := ba.CreateReply()
-		resp.Txn = ba.Txn
-		return resp, nil
-	})
-
-	br, pErr := twb.SendLocked(ctx, ba)
-	require.Nil(t, pErr)
-	require.NotNil(t, br)
-
-	// Another write on keyB
-	txn.BumpReadTimestamp(initialReadTimestamp.Next())
-	txn.Sequence++
-	ba = &kvpb.BatchRequest{}
-	ba.Header = kvpb.Header{Txn: &txn}
-	putReq = putArgs(keyB, valStr, txn.Sequence)
-	putReq.MustAcquireExclusiveLock = true
-	ba.Add(putReq)
-
-	mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-		require.Len(t, ba.Requests, 1)
-		resp := ba.CreateReply()
-		resp.Txn = ba.Txn
-		return resp, nil
-	})
-	br, pErr = twb.SendLocked(ctx, ba)
-	require.Nil(t, pErr)
-	require.NotNil(t, br)
-
-	// Commit the transaction and verify that the request has the expected exclusion timestamp.
-	txn.BumpReadTimestamp(initialReadTimestamp.Next())
-	ba = &kvpb.BatchRequest{}
-	ba.Header = kvpb.Header{Txn: &txn}
-	ba.Add(&kvpb.EndTxnRequest{Commit: true})
-
-	mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-		require.Len(t, ba.Requests, 4)
-
-		require.IsType(t, &kvpb.PutRequest{}, ba.Requests[0].GetInner())
-		putReq := ba.Requests[0].GetInner().(*kvpb.PutRequest)
-		require.Equal(t, keyA, putReq.Key)
-		require.Equal(t, initialReadTimestamp, putReq.ExpectExclusionSince)
-
-		require.IsType(t, &kvpb.DeleteRequest{}, ba.Requests[1].GetInner())
-		delReq := ba.Requests[1].GetInner().(*kvpb.DeleteRequest)
-		require.Equal(t, keyC, delReq.Key)
-		require.Equal(t, initialReadTimestamp, delReq.ExpectExclusionSince)
-
-		require.IsType(t, &kvpb.PutRequest{}, ba.Requests[2].GetInner())
-		putReq = ba.Requests[2].GetInner().(*kvpb.PutRequest)
-		require.Equal(t, keyB, putReq.Key)
-		require.Equal(t, initialReadTimestamp, putReq.ExpectExclusionSince)
-
-		require.IsType(t, &kvpb.EndTxnRequest{}, ba.Requests[3].GetInner())
-
-		resp := ba.CreateReply()
-		resp.Txn = ba.Txn
-		return resp, nil
-	})
-
-	br, pErr = twb.SendLocked(ctx, ba)
-	require.Nil(t, pErr)
-	require.NotNil(t, br)
-}
-
-// TestTxnWriteBufferCorrectlyRollsbackExclusionTimestamp verifies that
-// decomposed writes don't attach an exclusion timestamp that was established at
-// a sequence number that was subsequently rolled back.
-func TestTxnWriteBufferCorrectlyRollsbackExclusionTimestamp(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	twb, mockSender := makeMockTxnWriteBuffer(cluster.MakeClusterSettings())
-
-	txn := makeTxnProto()
-	txn.Sequence = 10
-	initialReadTimestamp := txn.ReadTimestamp
-
-	keyA := roachpb.Key("a")
-	valStr := "val"
-
-	savepoint := &savepoint{seqNum: txn.Sequence}
-	twb.createSavepointLocked(ctx, savepoint)
-
-	ba := &kvpb.BatchRequest{}
-	ba.Header = kvpb.Header{Txn: &txn}
-	putReq := putArgs(keyA, valStr, txn.Sequence)
-	putReq.MustAcquireExclusiveLock = true
-	ba.Add(putReq)
-
-	mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-		require.Len(t, ba.Requests, 1)
-		resp := ba.CreateReply()
-		resp.Txn = ba.Txn
-		return resp, nil
-	})
-
-	br, pErr := twb.SendLocked(ctx, ba)
-	require.Nil(t, pErr)
-	require.NotNil(t, br)
-
-	twb.rollbackToSavepointLocked(ctx, *savepoint)
-	txn.Sequence++
-
-	// Another write on keyA
-	nextReadTimestamp := initialReadTimestamp.Next()
-	txn.BumpReadTimestamp(nextReadTimestamp)
-	txn.Sequence++
-	ba = &kvpb.BatchRequest{}
-	ba.Header = kvpb.Header{Txn: &txn}
-	putReq = putArgs(keyA, valStr, txn.Sequence)
-	putReq.MustAcquireExclusiveLock = true
-	ba.Add(putReq)
-
-	mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-		require.Len(t, ba.Requests, 1)
-		resp := ba.CreateReply()
-		resp.Txn = ba.Txn
-		return resp, nil
-	})
-	br, pErr = twb.SendLocked(ctx, ba)
-	require.Nil(t, pErr)
-	require.NotNil(t, br)
-
-	// Commit the transaction and verify that the request has the expected exclusion timestamp.
-	txn.BumpReadTimestamp(nextReadTimestamp.Next())
-	ba = &kvpb.BatchRequest{}
-	ba.Header = kvpb.Header{Txn: &txn}
-	ba.Add(&kvpb.EndTxnRequest{Commit: true})
-
-	mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-		require.Len(t, ba.Requests, 2)
-
-		require.IsType(t, &kvpb.PutRequest{}, ba.Requests[0].GetInner())
-		putReq := ba.Requests[0].GetInner().(*kvpb.PutRequest)
-		require.Equal(t, keyA, putReq.Key)
-		require.Equal(t, nextReadTimestamp, putReq.ExpectExclusionSince)
-
-		require.IsType(t, &kvpb.EndTxnRequest{}, ba.Requests[1].GetInner())
-
-		resp := ba.CreateReply()
-		resp.Txn = ba.Txn
-		return resp, nil
-	})
-
-	br, pErr = twb.SendLocked(ctx, ba)
-	require.Nil(t, pErr)
-	require.NotNil(t, br)
-}
-
-func TestLockKeyInfo(t *testing.T) {
-	ts1 := hlc.Timestamp{WallTime: 1}
-	ts2 := hlc.Timestamp{WallTime: 2}
-
-	t.Run("held", func(t *testing.T) {
-		lki := newLockedKeyInfo(lock.Exclusive, 1, ts1)
-		require.True(t, lki.held(lock.Exclusive))
-		require.False(t, lki.held(lock.Shared))
-
-		lki = newLockedKeyInfo(lock.Shared, 1, ts1)
-		require.True(t, lki.held(lock.Shared))
-		require.False(t, lki.held(lock.Exclusive))
-	})
-	t.Run("heldGE", func(t *testing.T) {
-		lki := newLockedKeyInfo(lock.Exclusive, 1, ts1)
-		require.True(t, lki.heldGE(lock.Exclusive))
-		require.True(t, lki.heldGE(lock.Shared))
-
-		lki = newLockedKeyInfo(lock.Shared, 1, ts1)
-		require.False(t, lki.heldGE(lock.Exclusive))
-		require.True(t, lki.heldGE(lock.Shared))
-	})
-	t.Run("heldStr", func(t *testing.T) {
-		lki := newLockedKeyInfo(lock.Exclusive, 2, ts1)
-		require.Equal(t, lock.None, lki.heldStr(1))
-		require.Equal(t, lock.Exclusive, lki.heldStr(2))
-		require.Equal(t, lock.Exclusive, lki.heldStr(3))
-
-		lki = newLockedKeyInfo(lock.Shared, 2, ts1)
-		require.Equal(t, lock.None, lki.heldStr(1))
-		require.Equal(t, lock.Shared, lki.heldStr(2))
-		require.Equal(t, lock.Shared, lki.heldStr(3))
-
-		lki = newLockedKeyInfo(lock.Shared, 2, ts1)
-		lki.acquireLock(lock.Exclusive, 2, ts1)
-		require.Equal(t, lock.None, lki.heldStr(1))
-		require.Equal(t, lock.Exclusive, lki.heldStr(2))
-		require.Equal(t, lock.Exclusive, lki.heldStr(3))
-
-		lki = newLockedKeyInfo(lock.Shared, 2, ts1)
-		lki.acquireLock(lock.Exclusive, 3, ts1)
-		require.Equal(t, lock.None, lki.heldStr(1))
-		require.Equal(t, lock.Shared, lki.heldStr(2))
-		require.Equal(t, lock.Exclusive, lki.heldStr(3))
-		require.Equal(t, lock.Exclusive, lki.heldStr(4))
-	})
-	t.Run("acquireLock", func(t *testing.T) {
-		lki := newLockedKeyInfo(lock.Exclusive, 1, ts1)
-		lki.acquireLock(lock.Shared, 1, ts2)
-		require.Equal(t, ts1, lki.ts)
-		require.True(t, lki.held(lock.Exclusive))
-		require.True(t, lki.held(lock.Shared))
-
-		lki = newLockedKeyInfo(lock.Shared, 1, ts1)
-		lki.acquireLock(lock.Exclusive, 1, ts2)
-		require.Equal(t, ts1, lki.ts)
-		require.True(t, lki.held(lock.Exclusive))
-		require.True(t, lki.held(lock.Shared))
-	})
-	t.Run("rollbackSequence", func(t *testing.T) {
-		lki := newLockedKeyInfo(lock.Shared, 2, ts1)
-		lki.acquireLock(lock.Exclusive, 2, ts2)
-		require.False(t, lki.rollbackSequence(1))
-		require.False(t, lki.ts.IsSet())
-
-		// Also test rollback with only one lock type acquired.
-		lki = newLockedKeyInfo(lock.Shared, 2, ts1)
-		require.False(t, lki.rollbackSequence(1))
-		require.False(t, lki.ts.IsSet())
-
-		lki = newLockedKeyInfo(lock.Exclusive, 2, ts1)
-		require.False(t, lki.rollbackSequence(1))
-		require.False(t, lki.ts.IsSet())
-
-		lki = newLockedKeyInfo(lock.Shared, 2, ts1)
-		lki.acquireLock(lock.Exclusive, 3, ts2)
-		require.True(t, lki.rollbackSequence(3))
-		require.Equal(t, ts1, lki.ts)
-		require.True(t, lki.held(lock.Shared))
-		require.False(t, lki.held(lock.Exclusive))
-	})
-}
-
-// TestTxnWriteBufferElidesUnnecessaryLockingRequests tests that if the
-// txnWriteBuffer already holds a lock, it elides subsequent locking requests.
-func TestTxnWriteBufferElidesUnnecessaryLockingRequests(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-
-	// Each test case will send two locking requests to the txnWriteBuffer and,
-	// when appropriate, make an assertion that the second request is not sent to
-	// the underlying sender because it is completely served from the buffer.
-	type lockingRequests struct {
-		name string
-
-		// requiresValue, when true, indicates that this request requires a value to
-		// correctly generate a response.
-		requiresValue bool
-		// buffersValue, when true, indicates that this request buffers a value that
-		// can be later read.
-		buffersValue bool
-		// buffersLock, when true, indicates that this request records the fact that
-		// it locks. Every place where this is false represents a missed opportunity
-		// to avoid a locking request.
-		buffersLock bool
-		// bufferedLockStr indicates the strength of the lock that is buffered. Used
-		// in conjunction with buffersLock above.
-		bufferedLockStr lock.Strength
-		// isFullyCovered, when true, indicates that this request can be served
-		// completely from the buffer if a previous request locked the value at an
-		// equal or higher lock strength. If the request is never fully covered, use
-		// lock.None.
-		//
-		// This is different from requiresValue as it
-		// indicates that requests that aren't fully covered must always be sent to
-		// KV since there is no way to know if the buffer has all required values.
-		isFullyCoveredByLockStrength lock.Strength
-
-		generateRequest             func(t *testing.T, ba *kvpb.BatchRequest, txn *roachpb.Transaction)
-		optionalGenSecondRequest    func(t *testing.T, ba *kvpb.BatchRequest, txn *roachpb.Transaction)
-		validateAndGenerateResponse func(t *testing.T, ba *kvpb.BatchRequest) *kvpb.BatchResponse
-	}
-
-	// All point requests are assumed to be on A. All span requests are on [a, c).
-	keyA := roachpb.Key("a")
-	valueAStr := "valueA"
-	valueA := roachpb.MakeValueFromString(valueAStr)
-	keyC := roachpb.Key("c")
-
-	// A number of the requests expect a single locking get to be produced. This
-	// validator function is shared across them.
-	validateLockingGetOfStr := func(str lock.Strength) func(t *testing.T, ba *kvpb.BatchRequest) *kvpb.BatchResponse {
-		return func(t *testing.T, ba *kvpb.BatchRequest) *kvpb.BatchResponse {
-			getReq := ba.Requests[0].GetGet()
-			require.NotNil(t, getReq)
-			require.Equal(t, str, getReq.KeyLockingStrength)
-			require.Equal(t, lock.Unreplicated, getReq.KeyLockingDurability) // NB: always Unreplicated
-			resp := ba.CreateReply()
-			resp.Txn = ba.Txn
-			return resp
-		}
-	}
-
-	reqs := []lockingRequests{
-		{
-			name:                         "ReplicatedLockingScanScanFormat=KEY_VALUES",
-			buffersLock:                  false,
-			buffersValue:                 false,
-			requiresValue:                true,
-			isFullyCoveredByLockStrength: lock.None, // Scans are never covered
-			generateRequest: func(t *testing.T, ba *kvpb.BatchRequest, txn *roachpb.Transaction) {
-				ba.Add(&kvpb.ScanRequest{
-					KeyLockingStrength:   lock.Exclusive,
-					KeyLockingDurability: lock.Replicated,
-					ScanFormat:           kvpb.KEY_VALUES,
-					RequestHeader:        kvpb.RequestHeader{Key: keyA, EndKey: keyC, Sequence: txn.Sequence},
-				})
-			},
-			validateAndGenerateResponse: func(t *testing.T, ba *kvpb.BatchRequest) *kvpb.BatchResponse {
-				scanReq := ba.Requests[0].GetScan()
-				require.NotNil(t, scanReq)
-				require.Equal(t, lock.Exclusive, scanReq.KeyLockingStrength)
-				resp := ba.CreateReply()
-				resp.Txn = ba.Txn
-				resp.Responses[0].MustSetInner(&kvpb.ScanResponse{
-					Rows: []roachpb.KeyValue{{Key: keyA, Value: valueA}},
-				})
-				return resp
-			},
-		},
-		{
-			name:                         "ReplicatedLockingScanScanFormat=BATCH_RESPONSE",
-			buffersLock:                  false,
-			buffersValue:                 false,
-			requiresValue:                true,
-			isFullyCoveredByLockStrength: lock.None, // Scans are never covered
-			generateRequest: func(t *testing.T, ba *kvpb.BatchRequest, txn *roachpb.Transaction) {
-				ba.Add(&kvpb.ScanRequest{
-					KeyLockingStrength:   lock.Exclusive,
-					KeyLockingDurability: lock.Replicated,
-					ScanFormat:           kvpb.BATCH_RESPONSE,
-					RequestHeader:        kvpb.RequestHeader{Key: keyA, EndKey: keyC, Sequence: txn.Sequence},
-				})
-			},
-			validateAndGenerateResponse: func(t *testing.T, ba *kvpb.BatchRequest) *kvpb.BatchResponse {
-				scanReq := ba.Requests[0].GetScan()
-				require.NotNil(t, scanReq)
-				require.Equal(t, lock.Exclusive, scanReq.KeyLockingStrength)
-				resp := ba.CreateReply()
-				resp.Txn = ba.Txn
-				// Encode to BATCH_RESPONSE FORMAT.
-				kvLen, _ := encKVLength(keyA, &valueA)
-				repr := make([]byte, 0, kvLen)
-				appendKV(repr, keyA, &valueA)
-				resp.Responses[0].MustSetInner(&kvpb.ScanResponse{
-					BatchResponses: [][]byte{repr},
-				})
-				return resp
-			},
-		},
-		{
-			name:                         "ReplicatedLockingReverseScan",
-			buffersLock:                  false,
-			buffersValue:                 false,
-			requiresValue:                true,
-			isFullyCoveredByLockStrength: lock.None, // ReverseScans are never covered
-			generateRequest: func(t *testing.T, ba *kvpb.BatchRequest, txn *roachpb.Transaction) {
-				ba.Add(&kvpb.ReverseScanRequest{
-					KeyLockingStrength:   lock.Exclusive,
-					KeyLockingDurability: lock.Replicated,
-					ScanFormat:           kvpb.KEY_VALUES,
-					RequestHeader:        kvpb.RequestHeader{Key: keyA, EndKey: keyC, Sequence: txn.Sequence},
-				})
-			},
-			validateAndGenerateResponse: func(t *testing.T, ba *kvpb.BatchRequest) *kvpb.BatchResponse {
-				scanReq := ba.Requests[0].GetReverseScan()
-				require.NotNil(t, scanReq)
-				require.Equal(t, lock.Exclusive, scanReq.KeyLockingStrength)
-
-				resp := ba.CreateReply()
-				resp.Txn = ba.Txn
-				resp.Responses[0].MustSetInner(&kvpb.ReverseScanResponse{
-					Rows: []roachpb.KeyValue{{Key: keyA, Value: valueA}},
-				})
-				return resp
-			},
-		},
-		{
-			name:                         "ReplicatedLockingGet(Strength=Exclusive)",
-			buffersLock:                  false,
-			buffersValue:                 false,
-			requiresValue:                true,
-			isFullyCoveredByLockStrength: lock.Exclusive,
-			generateRequest: func(t *testing.T, ba *kvpb.BatchRequest, txn *roachpb.Transaction) {
-				getReq := &kvpb.GetRequest{
-					RequestHeader: kvpb.RequestHeader{Key: keyA, Sequence: txn.Sequence},
-				}
-				getReq.KeyLockingDurability = lock.Replicated
-				getReq.KeyLockingStrength = lock.Exclusive
-				ba.Add(getReq)
-			},
-			validateAndGenerateResponse: validateLockingGetOfStr(lock.Exclusive),
-		},
-		{
-			name:                         "UnReplicatedLockingGet(Strength=Exclusive)",
-			buffersLock:                  false,
-			buffersValue:                 false,
-			requiresValue:                true,
-			isFullyCoveredByLockStrength: lock.Exclusive,
-			generateRequest: func(t *testing.T, ba *kvpb.BatchRequest, txn *roachpb.Transaction) {
-				getReq := &kvpb.GetRequest{
-					RequestHeader: kvpb.RequestHeader{Key: keyA, Sequence: txn.Sequence},
-				}
-				getReq.KeyLockingDurability = lock.Unreplicated
-				getReq.KeyLockingStrength = lock.Exclusive
-				ba.Add(getReq)
-			},
-			validateAndGenerateResponse: validateLockingGetOfStr(lock.Exclusive),
-		},
-		{
-			name:                         "ReplicatedLockingGet(Strength=Shared)",
-			buffersLock:                  false,
-			buffersValue:                 false,
-			requiresValue:                true,
-			isFullyCoveredByLockStrength: lock.Shared,
-			generateRequest: func(t *testing.T, ba *kvpb.BatchRequest, txn *roachpb.Transaction) {
-				getReq := &kvpb.GetRequest{
-					RequestHeader: kvpb.RequestHeader{Key: keyA, Sequence: txn.Sequence},
-				}
-				getReq.KeyLockingDurability = lock.Replicated
-				getReq.KeyLockingStrength = lock.Shared
-				ba.Add(getReq)
-			},
-			validateAndGenerateResponse: validateLockingGetOfStr(lock.Shared),
-		},
-		{
-			name:                         "PutMustAcquireExclusive",
-			buffersLock:                  true,
-			bufferedLockStr:              lock.Exclusive,
-			buffersValue:                 true,
-			requiresValue:                false,
-			isFullyCoveredByLockStrength: lock.Exclusive,
-			generateRequest: func(t *testing.T, ba *kvpb.BatchRequest, txn *roachpb.Transaction) {
-				putReq := putArgs(keyA, valueAStr, txn.Sequence)
-				putReq.MustAcquireExclusiveLock = true
-				ba.Add(putReq)
-			},
-			validateAndGenerateResponse: validateLockingGetOfStr(lock.Exclusive),
-		},
-		{
-			name:            "DeleteMustAcquireExclusive",
-			buffersLock:     true,
-			bufferedLockStr: lock.Exclusive,
-			buffersValue:    true,
-			// Delete requires a value to correctly return the number of deleted row.
-			requiresValue:                true,
-			isFullyCoveredByLockStrength: lock.Exclusive,
-			generateRequest: func(t *testing.T, ba *kvpb.BatchRequest, txn *roachpb.Transaction) {
-				delReq := delArgs(keyA, txn.Sequence)
-				delReq.MustAcquireExclusiveLock = true
-				ba.Add(delReq)
-			},
-			validateAndGenerateResponse: validateLockingGetOfStr(lock.Exclusive),
-		},
-		{
-			name:            "ConditionalPut",
-			buffersLock:     true,
-			bufferedLockStr: lock.Exclusive,
-			buffersValue:    true,
-			// ConditionalPut requires a value to evaluate its expected bytes condition.
-			requiresValue:                true,
-			isFullyCoveredByLockStrength: lock.Exclusive,
-			generateRequest: func(t *testing.T, ba *kvpb.BatchRequest, txn *roachpb.Transaction) {
-				ba.Add(cputArgs(keyA, valueAStr, "", txn.Sequence))
-			},
-			// All of the current examples produce a buffered value of A. When issued
-			// as a second request, assert this value matches if it exists.
-			optionalGenSecondRequest: func(t *testing.T, ba *kvpb.BatchRequest, txn *roachpb.Transaction) {
-				cput := cputArgs(keyA, valueAStr, string(valueA.TagAndDataBytes()), txn.Sequence)
-				cput.AllowIfDoesNotExist = true
-				ba.Add(cput)
-			},
-			validateAndGenerateResponse: validateLockingGetOfStr(lock.Exclusive),
-		},
-	}
-
-	for _, firstReq := range reqs {
-		for _, secondReq := range reqs {
-			t.Run(fmt.Sprintf("%s followed by %s", firstReq.name, secondReq.name), func(t *testing.T) {
-				if !firstReq.buffersLock {
-					skip.WithIssue(t, 142977, "%s does not buffer its lock", firstReq.name)
-				}
-				if secondReq.requiresValue && !firstReq.buffersValue {
-					skip.WithIssue(t, 142977, "%s requires a value but %s does not buffer its response", firstReq.name, secondReq.name)
-				}
-
-				twb, mockSender := makeMockTxnWriteBuffer(cluster.MakeClusterSettings())
-				txn := makeTxnProto()
-				txn.Sequence = 10
-				// Send first request and run firstRequest validation
-				ba := &kvpb.BatchRequest{}
-				ba.Header = kvpb.Header{Txn: &txn}
-				firstReq.generateRequest(t, ba, &txn)
-
-				mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-					resp := firstReq.validateAndGenerateResponse(t, ba)
-					return resp, nil
-				})
-
-				br, pErr := twb.SendLocked(ctx, ba)
-				require.NotNil(t, br)
-				require.Nil(t, pErr)
-
-				// Send second request and expect nothing to be sent.
-				ba = &kvpb.BatchRequest{}
-				txn.Sequence++
-				ba.Header = kvpb.Header{Txn: &txn}
-				if secondReq.optionalGenSecondRequest != nil {
-					secondReq.optionalGenSecondRequest(t, ba, &txn)
-				} else {
-					secondReq.generateRequest(t, ba, &txn)
-				}
-
-				// The second request is fully covered if the first request has already
-				// acquired a lock at a sufficient lock strength.
-				isFullyCovered := secondReq.isFullyCoveredByLockStrength != lock.None &&
-					firstReq.bufferedLockStr >= secondReq.isFullyCoveredByLockStrength
-				mockSender.MockSend(func(ba *kvpb.BatchRequest) (*kvpb.BatchResponse, *kvpb.Error) {
-					if isFullyCovered {
-						resp := ba.CreateReply()
-						resp.Txn = ba.Txn
-						return resp, nil
-					} else {
-						resp := secondReq.validateAndGenerateResponse(t, ba)
-						return resp, nil
-					}
-				})
-
-				expectedCalls := 0
-				if !isFullyCovered {
-					expectedCalls = 1
-				}
-				numCalled := mockSender.NumCalled()
-				br, pErr = twb.SendLocked(ctx, ba)
-				require.Nil(t, pErr)
-				require.NotNil(t, br)
-				require.Len(t, br.Responses, 1)
-				require.Equal(t, numCalled+expectedCalls, mockSender.NumCalled())
-			})
-		}
 	}
 }

@@ -114,7 +114,6 @@ func registerCDCBench(r registry.Registry) {
 				Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 					runCDCBenchScan(ctx, t, c, scanType, rows, ranges, format)
 				},
-				PostProcessPerfMetrics: postProcessScanPerfMetrics,
 			})
 
 			// Enriched envelope benchmarks, using the same parameters.

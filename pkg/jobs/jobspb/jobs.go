@@ -11,7 +11,6 @@ import (
 	"slices"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
@@ -23,14 +22,6 @@ type JobID = catpb.JobID
 
 // InvalidJobID is the zero value for JobID corresponding to no job.
 const InvalidJobID = catpb.InvalidJobID
-
-// PendingJob represents a job that is pending creation (e.g. in a session).
-type PendingJob struct {
-	JobID       JobID
-	Type        Type
-	Description string
-	Username    username.SQLUsername
-}
 
 // ToText implements the ProtobinExecutionDetailFile interface.
 func (t *TraceData) ToText() []byte {

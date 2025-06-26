@@ -513,11 +513,7 @@ func TestAlterChangefeedDropTargetFamily(t *testing.T) {
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)
 		sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING, FAMILY onlya (a), FAMILY onlyb (b))`)
 
-		var args []any
-		if _, ok := f.(*webhookFeedFactory); ok {
-			args = append(args, optOutOfMetamorphicEnrichedEnvelope{reason: "metamorphic enriched envelope does not support column families for webhook sinks"})
-		}
-		testFeed := feed(t, f, `CREATE CHANGEFEED FOR foo FAMILY onlya, foo FAMILY onlyb`, args...)
+		testFeed := feed(t, f, `CREATE CHANGEFEED FOR foo FAMILY onlya, foo FAMILY onlyb`)
 		defer closeFeed(t, testFeed)
 
 		feed, ok := testFeed.(cdctest.EnterpriseTestFeed)
@@ -1195,11 +1191,7 @@ func TestAlterChangefeedColumnFamilyDatabaseScope(t *testing.T) {
 			`INSERT INTO movr.drivers VALUES (1, 'Alice')`,
 		)
 
-		var args []any
-		if _, ok := f.(*webhookFeedFactory); ok {
-			args = append(args, optOutOfMetamorphicEnrichedEnvelope{reason: "metamorphic enriched envelope does not support column families for webhook sinks"})
-		}
-		testFeed := feed(t, f, `CREATE CHANGEFEED FOR movr.drivers WITH diff, split_column_families`, args...)
+		testFeed := feed(t, f, `CREATE CHANGEFEED FOR movr.drivers WITH diff, split_column_families`)
 		defer closeFeed(t, testFeed)
 
 		assertPayloads(t, testFeed, []string{
@@ -1242,17 +1234,7 @@ func TestAlterChangefeedAlterTableName(t *testing.T) {
 		sqlDB.Exec(t,
 			`INSERT INTO movr.users VALUES (1, 'Alice')`,
 		)
-
-		// TODO(#145927): currently the metamorphic enriched envelope system for
-		// webhook uses source.table_name as the topic. This test expects the
-		// topic name to be durable across table renames, which is not expected
-		// to be true for source.table_name.
-		var args []any
-		if _, ok := f.(*webhookFeedFactory); ok {
-			args = append(args, optOutOfMetamorphicEnrichedEnvelope{reason: "see comment"})
-		}
-
-		testFeed := feed(t, f, `CREATE CHANGEFEED FOR movr.users WITH diff, resolved = '100ms'`, args...)
+		testFeed := feed(t, f, `CREATE CHANGEFEED FOR movr.users WITH diff, resolved = '100ms'`)
 		defer closeFeed(t, testFeed)
 
 		assertPayloads(t, testFeed, []string{

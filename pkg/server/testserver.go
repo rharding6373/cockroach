@@ -37,7 +37,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilitiespb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
-	"github.com/cockroachdb/cockroach/pkg/rpc/rpcbase"
 	"github.com/cockroachdb/cockroach/pkg/security/certnames"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/server/authserver"
@@ -76,6 +75,7 @@ import (
 	"github.com/cockroachdb/logtags"
 	"github.com/cockroachdb/redact"
 	"github.com/gogo/protobuf/proto"
+	"google.golang.org/grpc"
 )
 
 // makeTestConfig returns a config for testing. It overrides the
@@ -286,7 +286,7 @@ func makeTestConfigFromParams(params base.TestServerArgs) Config {
 	for _, storeSpec := range params.StoreSpecs {
 		if storeSpec.InMemory {
 			if storeSpec.Size.Percent > 0 {
-				panic(fmt.Sprintf("test server does not yet support in memory stores based on percentage of total memory: %s", base.StoreSpecCmdLineString(storeSpec)))
+				panic(fmt.Sprintf("test server does not yet support in memory stores based on percentage of total memory: %s", storeSpec))
 			}
 		} else {
 			// The default store spec is in-memory, so if this one is on-disk then
@@ -2379,6 +2379,16 @@ func (ts *testServer) SystemConfigProvider() config.SystemConfigProvider {
 	return ts.node.storeCfg.SystemConfigProvider
 }
 
+// KVFlowController is part of the serverutils.StorageLayerInterface.
+func (ts *testServer) KVFlowController() interface{} {
+	return ts.node.storeCfg.KVFlowController
+}
+
+// KVFlowHandles is part of the serverutils.StorageLayerInterface.
+func (ts *testServer) KVFlowHandles() interface{} {
+	return ts.node.storeCfg.KVFlowHandles
+}
+
 // Codec is part of the serverutils.ApplicationLayerInterface.
 func (ts *testServer) Codec() keys.SQLCodec {
 	return ts.ExecutorConfig().(sql.ExecutorConfig).Codec
@@ -2620,7 +2630,7 @@ func (ts *testServer) NewClientRPCContext(
 // RPCClientConn is part of the serverutils.ApplicationLayerInterface.
 func (ts *testServer) RPCClientConn(
 	test serverutils.TestFataler, user username.SQLUsername,
-) serverutils.RPCConn {
+) *grpc.ClientConn {
 	conn, err := ts.RPCClientConnE(user)
 	if err != nil {
 		test.Fatal(err)
@@ -2629,26 +2639,22 @@ func (ts *testServer) RPCClientConn(
 }
 
 // RPCClientConnE is part of the serverutils.ApplicationLayerInterface.
-func (ts *testServer) RPCClientConnE(user username.SQLUsername) (serverutils.RPCConn, error) {
+func (ts *testServer) RPCClientConnE(user username.SQLUsername) (*grpc.ClientConn, error) {
 	ctx := context.Background()
 	rpcCtx := ts.NewClientRPCContext(ctx, user)
-	conn, err := rpcCtx.GRPCDialNode(ts.AdvRPCAddr(), ts.NodeID(), ts.Locality(), rpcbase.DefaultClass).Connect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return serverutils.FromGRPCConn(conn), nil
+	return rpcCtx.GRPCDialNode(ts.AdvRPCAddr(), ts.NodeID(), ts.Locality(), rpc.DefaultClass).Connect(ctx)
 }
 
 // GetAdminClient is part of the serverutils.ApplicationLayerInterface.
-func (ts *testServer) GetAdminClient(test serverutils.TestFataler) serverpb.RPCAdminClient {
+func (ts *testServer) GetAdminClient(test serverutils.TestFataler) serverpb.AdminClient {
 	conn := ts.RPCClientConn(test, username.RootUserName())
-	return conn.NewAdminClient()
+	return serverpb.NewAdminClient(conn)
 }
 
 // GetStatusClient is part of the serverutils.ApplicationLayerInterface.
-func (ts *testServer) GetStatusClient(test serverutils.TestFataler) serverpb.RPCStatusClient {
+func (ts *testServer) GetStatusClient(test serverutils.TestFataler) serverpb.StatusClient {
 	conn := ts.RPCClientConn(test, username.RootUserName())
-	return conn.NewStatusClient()
+	return serverpb.NewStatusClient(conn)
 }
 
 // NewClientRPCContext is part of the serverutils.ApplicationLayerInterface.
@@ -2665,7 +2671,7 @@ func (t *testTenant) NewClientRPCContext(
 // RPCClientConn is part of the serverutils.ApplicationLayerInterface.
 func (t *testTenant) RPCClientConn(
 	test serverutils.TestFataler, user username.SQLUsername,
-) serverutils.RPCConn {
+) *grpc.ClientConn {
 	conn, err := t.RPCClientConnE(user)
 	if err != nil {
 		test.Fatal(err)
@@ -2674,29 +2680,22 @@ func (t *testTenant) RPCClientConn(
 }
 
 // RPCClientConnE is part of the serverutils.ApplicationLayerInterface.
-func (t *testTenant) RPCClientConnE(user username.SQLUsername) (serverutils.RPCConn, error) {
+func (t *testTenant) RPCClientConnE(user username.SQLUsername) (*grpc.ClientConn, error) {
 	ctx := context.Background()
 	rpcCtx := t.NewClientRPCContext(ctx, user)
-	if !rpcbase.TODODRPC {
-		conn, err := rpcCtx.GRPCDialPod(t.AdvRPCAddr(), t.SQLInstanceID(), t.Locality(), rpcbase.DefaultClass).Connect(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return serverutils.FromGRPCConn(conn), nil
-	}
-	return nil, nil
+	return rpcCtx.GRPCDialPod(t.AdvRPCAddr(), t.SQLInstanceID(), t.Locality(), rpc.DefaultClass).Connect(ctx)
 }
 
 // GetAdminClient is part of the serverutils.ApplicationLayerInterface.
-func (t *testTenant) GetAdminClient(test serverutils.TestFataler) serverpb.RPCAdminClient {
+func (t *testTenant) GetAdminClient(test serverutils.TestFataler) serverpb.AdminClient {
 	conn := t.RPCClientConn(test, username.RootUserName())
-	return conn.NewAdminClient()
+	return serverpb.NewAdminClient(conn)
 }
 
 // GetStatusClient is part of the serverutils.ApplicationLayerInterface.
-func (t *testTenant) GetStatusClient(test serverutils.TestFataler) serverpb.RPCStatusClient {
+func (t *testTenant) GetStatusClient(test serverutils.TestFataler) serverpb.StatusClient {
 	conn := t.RPCClientConn(test, username.RootUserName())
-	return conn.NewStatusClient()
+	return serverpb.NewStatusClient(conn)
 }
 
 func newClientRPCContext(

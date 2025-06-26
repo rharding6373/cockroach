@@ -183,12 +183,7 @@ func generateScanSpans(
 	if params.InvertedConstraint != nil {
 		return sb.SpansFromInvertedSpans(ctx, params.InvertedConstraint, params.IndexConstraint, nil /* scratch */)
 	}
-	var splitter span.Splitter
-	if params.Locking.MustLockAllRequestedColumnFamilies() {
-		splitter = span.MakeSplitterForSideEffect(tabDesc, index, params.NeededCols)
-	} else {
-		splitter = span.MakeSplitter(tabDesc, index, params.NeededCols)
-	}
+	splitter := span.MakeSplitter(tabDesc, index, params.NeededCols)
 	return sb.SpansFromConstraint(params.IndexConstraint, splitter)
 }
 
@@ -682,7 +677,6 @@ func (ef *execFactory) ConstructIndexJoin(
 	reqOrdering exec.OutputOrdering,
 	locking opt.Locking,
 	limitHint int64,
-	parallelize bool,
 ) (exec.Node, error) {
 	tabDesc := table.(*optTable).desc
 	colCfg := makeScanColumnsConfig(table, tableCols)
@@ -714,7 +708,6 @@ func (ef *execFactory) ConstructIndexJoin(
 			keyCols:     keyCols,
 			reqOrdering: ReqOrdering(reqOrdering),
 			limitHint:   limitHint,
-			parallelize: parallelize,
 		},
 	}
 
@@ -740,7 +733,6 @@ func (ef *execFactory) ConstructLookupJoin(
 	limitHint int64,
 	remoteOnlyLookups bool,
 	reverseScans bool,
-	parallelize bool,
 ) (exec.Node, error) {
 	if table.IsVirtualTable() {
 		return constructVirtualTableLookupJoin(
@@ -784,7 +776,6 @@ func (ef *execFactory) ConstructLookupJoin(
 			limitHint:                  limitHint,
 			remoteOnlyLookups:          remoteOnlyLookups,
 			reverseScans:               reverseScans,
-			parallelize:                parallelize,
 		},
 	}
 	if onCond != tree.DBoolTrue {
@@ -1224,7 +1215,7 @@ func (ef *execFactory) ConstructPlan(
 	if spool, ok := root.(*spoolNode); ok {
 		root = spool.input
 	}
-	return constructPlan(root, subqueries, cascades, triggers, checks, rootRowCount, flags)
+	return constructPlan(ef.planner, root, subqueries, cascades, triggers, checks, rootRowCount, flags)
 }
 
 // urlOutputter handles writing strings into an encoded URL for EXPLAIN (OPT,
@@ -1978,7 +1969,7 @@ func (ef *execFactory) ConstructCreateView(
 		return nil, err
 	}
 
-	planDeps, typeDepSet, funcDepSet, err := toPlanDependencies(deps, typeDeps, intsets.Fast{} /* funcDeps */)
+	planDeps, typeDepSet, _, err := toPlanDependencies(deps, typeDeps, intsets.Fast{} /* funcDeps */)
 	if err != nil {
 		return nil, err
 	}
@@ -1990,7 +1981,6 @@ func (ef *execFactory) ConstructCreateView(
 		columns:    columns,
 		planDeps:   planDeps,
 		typeDeps:   typeDepSet,
-		funcDeps:   funcDepSet,
 	}, nil
 }
 

@@ -15,7 +15,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/errors"
 )
 
 func init() {
@@ -30,10 +29,6 @@ func Get(
 	h := cArgs.Header
 	reply := resp.(*kvpb.GetResponse)
 
-	if err := args.Validate(h); err != nil {
-		return result.Result{}, err
-	}
-
 	var lockTableForSkipLocked storage.LockTableView
 	if h.WaitPolicy == lock.WaitPolicy_SkipLocked {
 		lockTableForSkipLocked = newRequestBoundLockTableView(
@@ -42,24 +37,11 @@ func Get(
 		defer lockTableForSkipLocked.Close()
 	}
 
-	readTimestamp := h.Timestamp
-	failOnMoreRecent := args.KeyLockingStrength != lock.None
-	expectExclusionSince := !args.ExpectExclusionSince.IsEmpty()
-
-	// If ExpectExclusionSince is set, use it as the read timestamp and set the
-	// MoreRecentPolicy to ExclusionViolationErrorOnMoreRecent to ensure that an
-	// exclusion violation error is returned if a write has occurred since the
-	// exclusion timestamp.
-	if expectExclusionSince {
-		readTimestamp = args.ExpectExclusionSince
-		failOnMoreRecent = true
-	}
-
-	getRes, err := storage.MVCCGet(ctx, readWriter, args.Key, readTimestamp, storage.MVCCGetOptions{
+	getRes, err := storage.MVCCGet(ctx, readWriter, args.Key, h.Timestamp, storage.MVCCGetOptions{
 		Inconsistent:          h.ReadConsistency != kvpb.CONSISTENT,
 		SkipLocked:            h.WaitPolicy == lock.WaitPolicy_SkipLocked,
 		Txn:                   h.Txn,
-		FailOnMoreRecent:      failOnMoreRecent,
+		FailOnMoreRecent:      args.KeyLockingStrength != lock.None,
 		ScanStats:             cArgs.ScanStats,
 		Uncertainty:           cArgs.Uncertainty,
 		MemoryAccount:         cArgs.EvalCtx.GetResponseMemoryAccount(),
@@ -72,17 +54,6 @@ func Get(
 		ReturnRawMVCCValues:   args.ReturnRawMVCCValues,
 	})
 	if err != nil {
-		// If the user has set ExpectExclusionSince, transform any WriteTooOld error
-		// into an ExclusionViolationError.
-		if expectExclusionSince {
-			if wtoErr := (*kvpb.WriteTooOldError)(nil); errors.As(err, &wtoErr) {
-				err = kvpb.NewExclusionViolationError(
-					readTimestamp,
-					wtoErr.ActualTimestamp.Prev(),
-					args.Key,
-				)
-			}
-		}
 		return result.Result{}, err
 	}
 	reply.ResumeSpan = getRes.ResumeSpan
