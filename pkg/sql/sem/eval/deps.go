@@ -448,9 +448,6 @@ type Planner interface {
 
 	// ClearTableStatsCache removes all entries from the node's table stats cache.
 	ClearTableStatsCache()
-
-	// RetryCounter is the number of times this statement has been retried.
-	RetryCounter() int
 }
 
 // InternalRows is an iterator interface that's exposed by the internal
@@ -530,11 +527,6 @@ type SessionAccessor interface {
 	// HasViewActivityOrViewActivityRedactedRole returns true iff the current session user has the
 	// VIEWACTIVITY or VIEWACTIVITYREDACTED permission.
 	HasViewActivityOrViewActivityRedactedRole(ctx context.Context) (bool, bool, error)
-
-	// ForEachSessionPendingJob calls the provided function for each pending job
-	// created in the session (hidden behind the generic interface{} to avoid
-	// circular dependencies, but the caller can cast it to jobs.Record).
-	ForEachSessionPendingJob(fn func(record jobspb.PendingJob) error) error
 }
 
 // PreparedStatementState is a limited interface that exposes metadata about
@@ -543,7 +535,7 @@ type PreparedStatementState interface {
 	// HasActivePortals returns true if there are portals in the session.
 	HasActivePortals() bool
 	// MigratablePreparedStatements returns a mapping of all prepared statements.
-	MigratablePreparedStatements() ([]sessiondatapb.MigratableSession_PreparedStatement, error)
+	MigratablePreparedStatements() []sessiondatapb.MigratableSession_PreparedStatement
 	// HasPortal returns true if there exists a given named portal in the session.
 	HasPortal(s string) bool
 }
@@ -555,16 +547,13 @@ type PreparedStatementState interface {
 // interface only work on the gateway node (i.e. not from
 // distributed processors).
 type ClientNoticeSender interface {
-	// BufferClientNotice buffers the notice in the command result to send to the
-	// client. This is flushed before the connection is closed.
+	// BufferClientNotice buffers the notice to send to the client.
+	// This is flushed before the connection is closed.
 	BufferClientNotice(ctx context.Context, notice pgnotice.Notice)
-	// SendClientNotice immediately flushes the notice to the client.
-	// SendNotice sends the given notice to the client. The notice will be in
-	// the client communication buffer until it is flushed. Flushing can be forced
-	// to occur immediately by setting immediateFlush to true.
-	// This is used to implement PLpgSQL RAISE statements; most cases should use
+	// SendClientNotice immediately flushes the notice to the client. This is used
+	// to implement PLpgSQL RAISE statements; most cases should use
 	// BufferClientNotice.
-	SendClientNotice(ctx context.Context, notice pgnotice.Notice, immediateFlush bool) error
+	SendClientNotice(ctx context.Context, notice pgnotice.Notice) error
 }
 
 // DeferredRoutineSender allows a nested routine to send the information needed
@@ -665,7 +654,7 @@ type ChangefeedState interface {
 	SetHighwater(frontier hlc.Timestamp)
 
 	// SetCheckpoint sets the checkpoint for the changefeed.
-	SetCheckpoint(checkpoint *jobspb.TimestampSpansMap)
+	SetCheckpoint(spans []roachpb.Span, timestamp hlc.Timestamp)
 }
 
 // TenantOperator is capable of interacting with tenant state, allowing SQL
@@ -719,6 +708,7 @@ type GossipOperator interface {
 type SQLStatsController interface {
 	ResetClusterSQLStats(ctx context.Context) error
 	ResetActivityTables(ctx context.Context) error
+	ResetInsightsTables(ctx context.Context) error
 	CreateSQLStatsCompactionSchedule(ctx context.Context) error
 }
 
@@ -748,7 +738,6 @@ type StmtDiagnosticsRequestInsertFunc func(
 	minExecutionLatency time.Duration,
 	expiresAfter time.Duration,
 	redacted bool,
-	username string,
 ) error
 
 // AsOfSystemTime represents the result from the evaluation of AS OF SYSTEM TIME
@@ -770,8 +759,4 @@ type AsOfSystemTime struct {
 	// This is be zero if there is no maximum bound.
 	// In non-zero, we want a read t where Timestamp <= t < MaxTimestampBound.
 	MaxTimestampBound hlc.Timestamp
-
-	// ForBackfill indicates if this AOST expression was added to an operation
-	// that requires a backfill, like CREATE TABLE AS.
-	ForBackfill bool
 }

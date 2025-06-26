@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/cockroachdb/cockroach/pkg/util/debugutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log/channel"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logconfig"
@@ -83,7 +82,7 @@ func init() {
 //
 // This is used to assert that configuration is performed
 // before logging has been used for the first time.
-func IsActive() (active bool, firstUse debugutil.SafeStack) {
+func IsActive() (active bool, firstUse string) {
 	logging.mu.Lock()
 	defer logging.mu.Unlock()
 	return logging.mu.active, logging.mu.firstUseStack
@@ -366,19 +365,6 @@ func ApplyConfig(
 		attachSinkInfo(httpSinkInfo, &fc.Channels)
 	}
 
-	// Create the OpenTelemetry sinks.
-	for _, fc := range config.Sinks.OtlpServers {
-		if fc.Filter == severity.NONE {
-			continue
-		}
-		optlSinkInfo, err := newOtlpSinkInfo(*fc)
-		if err != nil {
-			return nil, err
-		}
-		attachBufferWrapper(optlSinkInfo, fc.CommonSinkConfig.Buffering, closer)
-		attachSinkInfo(optlSinkInfo, &fc.Channels)
-	}
-
 	// Prepend the interceptor sink to all channels.
 	// We prepend it because we want the interceptors
 	// to see every event before they make their way to disk/network.
@@ -444,11 +430,6 @@ func newHTTPSinkInfo(c logconfig.HTTPSinkConfig) (*sinkInfo, error) {
 	}
 	info.sink = httpSink
 	return info, nil
-}
-
-func newOtlpSinkInfo(_ logconfig.OtlpSinkConfig) (*sinkInfo, error) {
-	// TODO(mudit): Implement newOtlpSink
-	return nil, nil
 }
 
 // applyFilters applies the channel filters to a sinkInfo.

@@ -122,7 +122,7 @@ func TestDataDriven(t *testing.T) {
 					SQLExecutor: sqlExecutorKnobs,
 				},
 				StoreSpecs: []base.StoreSpec{
-					{InMemory: true, Attributes: []string{attr}},
+					{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{attr}}},
 				},
 			}
 		}
@@ -154,7 +154,6 @@ func TestDataDriven(t *testing.T) {
 			tenant = spanConfigTestCluster.InitializeTenant(ctx, roachpb.SystemTenantID)
 		}
 		execCfg := tenant.ExecCfg()
-		tenant.Exec("SET autocommit_before_ddl = false")
 
 		var f func(t *testing.T, d *datadriven.TestData) string
 		f = func(t *testing.T, d *datadriven.TestData) string {
