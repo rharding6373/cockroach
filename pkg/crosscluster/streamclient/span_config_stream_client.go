@@ -15,7 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/jackc/pgconn"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v4"
 )
 
 // SpanConfigClient provides methods to interact with a stream of span
@@ -43,8 +43,8 @@ func NewSpanConfigStreamClient(
 ) (SpanConfigClient, error) {
 	remote := remoteUri.URL()
 
-	options := processOptions(opts)
-	conn, config, err := newPGConnForClient(ctx, remote, options)
+	streamOpts := processOptions(opts)
+	conn, config, err := newPGConnForClient(ctx, remote, streamOpts)
 	if err != nil {
 		return nil, err
 	}

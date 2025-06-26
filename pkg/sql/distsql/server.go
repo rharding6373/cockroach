@@ -77,7 +77,7 @@ func NewServer(
 		flowRegistry:      flowinfra.NewFlowRegistry(),
 		remoteFlowRunner:  remoteFlowRunner,
 		memMonitor: mon.NewMonitor(mon.Options{
-			Name: mon.MakeName("distsql"),
+			Name: mon.MakeMonitorName("distsql"),
 			// Note that we don't use 'sql.mem.distsql.*' metrics here since
 			// that would double count them with the 'flow' monitor in
 			// setupFlow.
@@ -95,12 +95,6 @@ func NewServer(
 	ds.remoteFlowRunner.Init(ds.Metrics)
 
 	return ds
-}
-
-type drpcServerImpl ServerImpl
-
-func (ds *ServerImpl) AsDRPCServer() execinfrapb.DRPCDistSQLServer {
-	return (*drpcServerImpl)(ds)
 }
 
 // Start launches workers for the server.
@@ -245,13 +239,13 @@ func (ds *ServerImpl) setupFlow(
 	}
 
 	monitor = mon.NewMonitor(mon.Options{
-		Name:     mon.MakeName("flow").WithUUID(req.Flow.FlowID.Short()),
+		Name:     mon.MakeMonitorNameWithID("flow ", req.Flow.FlowID.Short()),
 		CurCount: ds.Metrics.CurBytesCount,
 		MaxHist:  ds.Metrics.MaxBytesHist,
 		Settings: ds.Settings,
 	})
 	monitor.Start(ctx, parentMonitor, reserved)
-	diskMonitor = execinfra.NewMonitor(ctx, ds.ParentDiskMonitor, mon.MakeName("flow-disk-monitor"))
+	diskMonitor = execinfra.NewMonitor(ctx, ds.ParentDiskMonitor, "flow-disk-monitor")
 
 	makeLeaf := func(ctx context.Context) (*kv.Txn, error) {
 		tis := req.LeafTxnInputState
@@ -278,36 +272,31 @@ func (ds *ServerImpl) setupFlow(
 		// this allows us to avoid an unnecessary deserialization of the eval
 		// context proto.
 		evalCtx = localState.EvalContext
+		// We create an eval context variable scoped to this block and reference
+		// it in the onFlowCleanupEnd closure. If the closure referenced
+		// evalCtx, then the pointer would be heap allocated because it is
+		// modified in the other branch of the conditional, and Go's escape
+		// analysis cannot determine that the capture and modification are
+		// mutually exclusive.
+		localEvalCtx := evalCtx
+		// We're about to mutate the evalCtx and we want to restore its original
+		// state once the flow cleans up. Note that we could have made a copy of
+		// the whole evalContext, but that isn't free, so we choose to restore
+		// the original state in order to avoid performance regressions.
+		origTxn := localEvalCtx.Txn
+		onFlowCleanupEnd = func(ctx context.Context) {
+			localEvalCtx.Txn = origTxn
+			reserved.Close(ctx)
+		}
 		if localState.MustUseLeafTxn() {
 			var err error
 			leafTxn, err = makeLeaf(ctx)
 			if err != nil {
 				return nil, nil, nil, err
 			}
-			// We create an eval context variable scoped to this block and
-			// reference it in the onFlowCleanupEnd closure. If the closure
-			// referenced evalCtx, then the pointer would be heap allocated
-			// because it is modified in the other branch of the conditional,
-			// and Go's escape analysis cannot determine that the capture and
-			// modification are mutually exclusive.
-			localEvalCtx := evalCtx
-			// We're about to mutate the evalCtx and we want to restore its
-			// original state once the flow cleans up. Note that we could have
-			// made a copy of the whole evalContext, but that isn't free, so we
-			// choose to restore the original state in order to avoid
-			// performance regressions.
-			origTxn := localEvalCtx.Txn
-			onFlowCleanupEnd = func(ctx context.Context) {
-				localEvalCtx.Txn = origTxn
-				reserved.Close(ctx)
-			}
 			// Update the Txn field early (before f.SetTxn() below) since some
 			// processors capture the field in their constructor (see #41992).
 			localEvalCtx.Txn = leafTxn
-		} else {
-			onFlowCleanupEnd = func(ctx context.Context) {
-				reserved.Close(ctx)
-			}
 		}
 	} else {
 		onFlowCleanupEnd = func(ctx context.Context) {
@@ -620,13 +609,6 @@ func (ds *ServerImpl) setupSpanForIncomingRPC(
 		tracing.WithServerSpanKind)
 }
 
-// SetupFlow is part of the execinfrapb.DRPCDistSQLServer interface.
-func (ds *drpcServerImpl) SetupFlow(
-	ctx context.Context, req *execinfrapb.SetupFlowRequest,
-) (*execinfrapb.SimpleResponse, error) {
-	return (*ServerImpl)(ds).SetupFlow(ctx, req)
-}
-
 // SetupFlow is part of the execinfrapb.DistSQLServer interface.
 func (ds *ServerImpl) SetupFlow(
 	ctx context.Context, req *execinfrapb.SetupFlowRequest,
@@ -689,13 +671,6 @@ func (ds *ServerImpl) SetupFlow(
 	return &execinfrapb.SimpleResponse{}, nil
 }
 
-// CancelDeadFlows is part of the execinfrapb.DRPCDistSQLServer interface.
-func (ds *drpcServerImpl) CancelDeadFlows(
-	ctx context.Context, req *execinfrapb.CancelDeadFlowsRequest,
-) (*execinfrapb.SimpleResponse, error) {
-	return (*ServerImpl)(ds).CancelDeadFlows(ctx, req)
-}
-
 // CancelDeadFlows is part of the execinfrapb.DistSQLServer interface.
 func (ds *ServerImpl) CancelDeadFlows(
 	ctx context.Context, req *execinfrapb.CancelDeadFlowsRequest,
@@ -706,7 +681,7 @@ func (ds *ServerImpl) CancelDeadFlows(
 }
 
 func (ds *ServerImpl) flowStreamInt(
-	ctx context.Context, stream execinfrapb.RPCDistSQL_FlowStreamStream,
+	ctx context.Context, stream execinfrapb.DistSQL_FlowStreamServer,
 ) error {
 	// Receive the first message.
 	msg, err := stream.Recv()
@@ -740,17 +715,8 @@ func (ds *ServerImpl) flowStreamInt(
 	return streamStrategy.Run(ctx, stream, msg, f)
 }
 
-// FlowStream is part of the execinfrapb.DRPCDistSQLServer interface.
-func (ds *drpcServerImpl) FlowStream(stream execinfrapb.DRPCDistSQL_FlowStreamStream) error {
-	return (*ServerImpl)(ds).flowStream(stream)
-}
-
 // FlowStream is part of the execinfrapb.DistSQLServer interface.
 func (ds *ServerImpl) FlowStream(stream execinfrapb.DistSQL_FlowStreamServer) error {
-	return ds.flowStream(stream)
-}
-
-func (ds *ServerImpl) flowStream(stream execinfrapb.RPCDistSQL_FlowStreamStream) error {
 	ctx := ds.AnnotateCtx(stream.Context())
 	err := ds.flowStreamInt(ctx, stream)
 	if err != nil && log.V(2) {

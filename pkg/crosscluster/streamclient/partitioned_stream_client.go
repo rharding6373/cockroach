@@ -23,7 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v4"
 )
 
 type partitionedStreamClient struct {
@@ -44,16 +44,16 @@ type partitionedStreamClient struct {
 func NewPartitionedStreamClient(
 	ctx context.Context, remote ClusterUri, opts ...Option,
 ) (*partitionedStreamClient, error) {
-	options := processOptions(opts)
-	conn, config, err := newPGConnForClient(ctx, remote.URL(), options)
+	streamOpts := processOptions(opts)
+	conn, config, err := newPGConnForClient(ctx, remote.URL(), streamOpts)
 	if err != nil {
 		return nil, err
 	}
 	client := partitionedStreamClient{
 		clusterUri: remote,
 		pgxConfig:  config,
-		compressed: options.compressed,
-		logical:    options.logical,
+		compressed: streamOpts.compressed,
+		logical:    streamOpts.logical,
 	}
 	client.mu.activeSubscriptions = make(map[*partitionedStreamSubscription]struct{})
 	client.mu.srcConn = conn
@@ -254,9 +254,10 @@ func (p *partitionedStreamClient) Subscribe(
 	sps.InitialScanTimestamp = initialScanTime
 	if previousReplicatedTimes != nil {
 		sps.PreviousReplicatedTimestamp = previousReplicatedTimes.Frontier()
-		for s, t := range previousReplicatedTimes.Entries() {
+		previousReplicatedTimes.Entries(func(s roachpb.Span, t hlc.Timestamp) (done span.OpResult) {
 			sps.Progress = append(sps.Progress, jobspb.ResolvedSpan{Span: s, Timestamp: t})
-		}
+			return span.ContinueMatch
+		})
 	}
 	sps.Spans = sourcePartition.Spans
 	sps.ConsumerNode = consumerNode

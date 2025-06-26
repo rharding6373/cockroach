@@ -177,7 +177,7 @@ func (o *Outbox) Run(
 	ctx = logtags.AddTag(ctx, "streamID", streamID)
 	log.VEventf(ctx, 2, "Outbox Dialing %s", sqlInstanceID)
 
-	var stream execinfrapb.RPCDistSQL_FlowStreamClient
+	var stream execinfrapb.DistSQL_FlowStreamClient
 	if err := func() error {
 		conn, err := execinfra.GetConnForOutbox(ctx, dialer, sqlInstanceID, connectionTimeout)
 		if err != nil {
@@ -185,7 +185,7 @@ func (o *Outbox) Run(
 			return err
 		}
 
-		client := execinfrapb.NewGRPCDistSQLClientAdapter(conn)
+		client := execinfrapb.NewDistSQLClient(conn)
 		// We use the flow context for the RPC so that when outbox context is
 		// canceled in case of a graceful shutdown, the gRPC stream keeps on
 		// running. If, however, the flow context is canceled, then the

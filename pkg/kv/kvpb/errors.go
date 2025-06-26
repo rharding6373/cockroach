@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	_ "github.com/cockroachdb/errors/extgrpc" // register EncodeError support for gRPC Status
-	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/redact"
 	"github.com/gogo/protobuf/proto"
 )
@@ -297,8 +296,6 @@ const (
 	LockConflictErrType                     ErrorDetailType = 45
 	ReplicaUnavailableErrType               ErrorDetailType = 46
 	ProxyFailedErrType                      ErrorDetailType = 47
-	ExclusionViolationErrType               ErrorDetailType = 48
-
 	// When adding new error types, don't forget to update NumErrors below.
 
 	// CommunicationErrType indicates a gRPC error; this is not an ErrorDetail.
@@ -308,7 +305,7 @@ const (
 	// detail. The value 25 is chosen because it's reserved in the errors proto.
 	InternalErrType ErrorDetailType = 25
 
-	NumErrors int = 49
+	NumErrors int = 48
 )
 
 // Register the migration of all errors that used to be in the roachpb package
@@ -350,7 +347,6 @@ func init() {
 	errors.RegisterTypeMigration(roachpbPath, "*roachpb.RefreshFailedError", &RefreshFailedError{})
 	errors.RegisterTypeMigration(roachpbPath, "*roachpb.MVCCHistoryMutationError", &MVCCHistoryMutationError{})
 	errors.RegisterTypeMigration(roachpbPath, "*roachpb.InsufficientSpaceError", &InsufficientSpaceError{})
-	errors.RegisterTypeMigration(roachpbPath, "*roachpb.PebbleCorruptionError", &PebbleCorruptionError{})
 }
 
 // GoError returns a Go error converted from Error. If the error is a transaction
@@ -1628,35 +1624,6 @@ func (e *InsufficientSpaceError) SafeFormatError(p errors.Printer) (next error) 
 	return nil
 }
 
-// NewPebbleCorruptionError creates a new PebbleCorruptionError.
-func NewPebbleCorruptionError(
-	storeID roachpb.StoreID, info *pebble.DataCorruptionInfo,
-) *PebbleCorruptionError {
-	err := &PebbleCorruptionError{
-		StoreID:  storeID,
-		Path:     info.Path,
-		IsRemote: info.IsRemote,
-		ExtraMsg: info.Details.Error(),
-	}
-	return err
-}
-
-func (e *PebbleCorruptionError) Error() string {
-	return fmt.Sprint(e)
-}
-
-// Format implements fmt.Formatter.
-func (e *PebbleCorruptionError) Format(s fmt.State, verb rune) {
-	errors.FormatError(e, s, verb)
-}
-
-// SafeFormatError implements errors.SafeFormatter.
-func (e *PebbleCorruptionError) SafeFormatError(p errors.Printer) (next error) {
-	p.Printf("pebble corruption error on store id:%d, path:%s, remote:%t, extra message: %s",
-		e.StoreID, e.Path, e.IsRemote, e.ExtraMsg)
-	return nil
-}
-
 // NewNotLeaseHolderError returns a NotLeaseHolderError initialized with the
 // replica for the holder (if any) of the given lease.
 //
@@ -1828,79 +1795,6 @@ func NewKeyCollisionError(key roachpb.Key, value []byte) error {
 	return ret
 }
 
-// snapshotReservationTimeoutError represents an error that occurs when
-// giving up during snapshot reservation due to cluster setting timeout.
-type SnapshotReservationTimeoutError struct {
-	cause       error
-	settingName string
-}
-
-// Error implements the error interface.
-func (e *SnapshotReservationTimeoutError) Error() string {
-	return redact.Sprint(e).StripMarkers()
-}
-
-// SafeFormatError implements errors.SafeFormatter.
-func (e *SnapshotReservationTimeoutError) SafeFormatError(p errors.Printer) (next error) {
-	p.Printf("giving up during snapshot reservation due to cluster setting %q: %v", redact.SafeString(e.settingName), redact.SafeString(e.cause.Error()))
-	return nil
-}
-
-// NewSnapshotReservationTimeoutError creates a new SnapshotReservationTimeoutError.
-func NewSnapshotReservationTimeoutError(
-	cause error, settingName string,
-) *SnapshotReservationTimeoutError {
-	return &SnapshotReservationTimeoutError{
-		cause:       cause,
-		settingName: settingName,
-	}
-}
-
-// NewExclusionViolationError creates a new ExclusionViolationError. This error
-// is returned by requests that encounter an existing value written at a
-// timestamp at which they expected to have an exclusive lock on the key. This
-// error implies that the lock was lost, which is possible for unreplicated locks.
-func NewExclusionViolationError(
-	exclusionTS, actualTS hlc.Timestamp, key roachpb.Key,
-) *ExclusionViolationError {
-	return &ExclusionViolationError{
-		ExpectedExclusionSinceTimestamp: exclusionTS,
-		ViolationTimestamp:              actualTS,
-		Key:                             key.Clone(),
-	}
-}
-
-func (e *ExclusionViolationError) SafeFormatError(p errors.Printer) (next error) {
-	p.Printf("write exclusion on key %s expected since %s but found write at %s",
-		e.Key,
-		e.ExpectedExclusionSinceTimestamp,
-		e.ViolationTimestamp,
-	)
-	return nil
-}
-
-func (e *ExclusionViolationError) Error() string {
-	return redact.Sprint(e).StripMarkers()
-}
-
-func (*ExclusionViolationError) canRestartTransaction() TransactionRestart {
-	return TransactionRestart_IMMEDIATE
-}
-
-// Type is part of the ErrorDetailInterface.
-func (e *ExclusionViolationError) Type() ErrorDetailType {
-	return ExclusionViolationErrType
-}
-
-// RetryTimestamp returns the timestamp that should be used to retry an
-// operation after encountering a ExclusionViolationError.
-func (e *ExclusionViolationError) RetryTimestamp() hlc.Timestamp {
-	return e.ViolationTimestamp.Next()
-}
-
-var _ ErrorDetailInterface = &ExclusionViolationError{}
-var _ transactionRestartError = &ExclusionViolationError{}
-
 func init() {
 	encode := func(ctx context.Context, err error) (msgPrefix string, safeDetails []string, payload proto.Message) {
 		errors.As(err, &payload) // payload = err.(proto.Message)
@@ -1960,5 +1854,3 @@ var _ errors.SafeFormatter = &UnhandledRetryableError{}
 var _ errors.SafeFormatter = &ReplicaUnavailableError{}
 var _ errors.SafeFormatter = &ProxyFailedError{}
 var _ errors.SafeFormatter = &KeyCollisionError{}
-var _ errors.SafeFormatter = &SnapshotReservationTimeoutError{}
-var _ errors.SafeFormatter = &ExclusionViolationError{}

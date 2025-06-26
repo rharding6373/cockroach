@@ -337,13 +337,6 @@ func TestTenantLogic_bpchar(
 	runLogicTest(t, "bpchar")
 }
 
-func TestTenantLogic_buffered_writes(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "buffered_writes")
-}
-
 func TestTenantLogic_builtin_function(
 	t *testing.T,
 ) {
@@ -512,6 +505,13 @@ func TestTenantLogic_create_index(
 	runLogicTest(t, "create_index")
 }
 
+func TestTenantLogic_create_statements(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "create_statements")
+}
+
 func TestTenantLogic_create_table(
 	t *testing.T,
 ) {
@@ -594,13 +594,6 @@ func TestTenantLogic_dependencies(
 ) {
 	defer leaktest.AfterTest(t)()
 	runLogicTest(t, "dependencies")
-}
-
-func TestTenantLogic_direct_columnar_scans(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "direct_columnar_scans")
 }
 
 func TestTenantLogic_discard(
@@ -1161,48 +1154,6 @@ func TestTenantLogic_json_index(
 ) {
 	defer leaktest.AfterTest(t)()
 	runLogicTest(t, "json_index")
-}
-
-func TestTenantLogic_jsonb_path_exists(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "jsonb_path_exists")
-}
-
-func TestTenantLogic_jsonb_path_match(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "jsonb_path_match")
-}
-
-func TestTenantLogic_jsonb_path_query(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "jsonb_path_query")
-}
-
-func TestTenantLogic_jsonb_path_query_array(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "jsonb_path_query_array")
-}
-
-func TestTenantLogic_jsonb_path_query_first(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "jsonb_path_query_first")
-}
-
-func TestTenantLogic_jsonpath(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "jsonpath")
 }
 
 func TestTenantLogic_kv_builtin_functions_tenant(
@@ -1926,13 +1877,6 @@ func TestTenantLogic_show_create(
 	runLogicTest(t, "show_create")
 }
 
-func TestTenantLogic_show_create_all_routines(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "show_create_all_routines")
-}
-
 func TestTenantLogic_show_create_all_schemas(
 	t *testing.T,
 ) {
@@ -1952,13 +1896,6 @@ func TestTenantLogic_show_create_all_tables_builtin(
 ) {
 	defer leaktest.AfterTest(t)()
 	runLogicTest(t, "show_create_all_tables_builtin")
-}
-
-func TestTenantLogic_show_create_all_triggers(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "show_create_all_triggers")
 }
 
 func TestTenantLogic_show_create_all_types(
@@ -2367,25 +2304,18 @@ func TestTenantLogic_udf_fk(
 	runLogicTest(t, "udf_fk")
 }
 
+func TestTenantLogic_udf_in_column_defaults(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "udf_in_column_defaults")
+}
+
 func TestTenantLogic_udf_in_constraints(
 	t *testing.T,
 ) {
 	defer leaktest.AfterTest(t)()
 	runLogicTest(t, "udf_in_constraints")
-}
-
-func TestTenantLogic_udf_in_index(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "udf_in_index")
-}
-
-func TestTenantLogic_udf_in_table(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "udf_in_table")
 }
 
 func TestTenantLogic_udf_insert(
@@ -2598,13 +2528,6 @@ func TestTenantLogic_values(
 	runLogicTest(t, "values")
 }
 
-func TestTenantLogic_vector_index(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runLogicTest(t, "vector_index")
-}
-
 func TestTenantLogic_vectorize(
 	t *testing.T,
 ) {
@@ -2738,13 +2661,6 @@ func TestTenantLogicCCL_cluster_locks_tenant(
 	runCCLLogicTest(t, "cluster_locks_tenant")
 }
 
-func TestTenantLogicCCL_cluster_locks_tenant_write_buffering(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runCCLLogicTest(t, "cluster_locks_tenant_write_buffering")
-}
-
 func TestTenantLogicCCL_crdb_internal_tenant(
 	t *testing.T,
 ) {
@@ -2848,13 +2764,6 @@ func TestTenantLogicCCL_plpgsql_record(
 ) {
 	defer leaktest.AfterTest(t)()
 	runCCLLogicTest(t, "plpgsql_record")
-}
-
-func TestTenantLogicCCL_plpgsql_srf(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runCCLLogicTest(t, "plpgsql_srf")
 }
 
 func TestTenantLogicCCL_plpgsql_txn(
@@ -2967,13 +2876,6 @@ func TestTenantLogicCCL_triggers(
 ) {
 	defer leaktest.AfterTest(t)()
 	runCCLLogicTest(t, "triggers")
-}
-
-func TestTenantLogicCCL_txn_retry(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runCCLLogicTest(t, "txn_retry")
 }
 
 func TestTenantLogicCCL_udf_params(

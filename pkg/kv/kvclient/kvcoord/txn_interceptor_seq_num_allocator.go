@@ -122,7 +122,7 @@ func (s *txnSeqNumAllocator) populateLeafInputState(tis *roachpb.LeafTxnInputSta
 	tis.ReadSeqNum = s.readSeq
 }
 
-// initializeLeaf is part of the txnInterceptor interface.
+// initializeLeaf loads the read seqnum for a leaf transaction.
 func (s *txnSeqNumAllocator) initializeLeaf(tis *roachpb.LeafTxnInputState) {
 	s.steppingMode = kv.SteppingMode(tis.SteppingModeEnabled)
 	s.readSeq = tis.ReadSeqNum
@@ -218,9 +218,6 @@ func (s *txnSeqNumAllocator) epochBumpedLocked() {
 func (s *txnSeqNumAllocator) createSavepointLocked(ctx context.Context, sp *savepoint) {
 	sp.seqNum = s.writeSeq
 }
-
-// releaseSavepointLocked is part of the txnInterceptor interface.
-func (*txnSeqNumAllocator) releaseSavepointLocked(context.Context, *savepoint) {}
 
 // rollbackToSavepointLocked is part of the txnInterceptor interface.
 func (s *txnSeqNumAllocator) rollbackToSavepointLocked(context.Context, savepoint) {

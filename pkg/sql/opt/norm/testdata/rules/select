@@ -25,30 +25,6 @@ CREATE TABLE e
 )
 ----
 
-exec-ddl
-CREATE TABLE rls (x INT PRIMARY KEY, y INT, alice_has_access BOOL);
-----
-
-exec-ddl
-CREATE INDEX ON rls(y);
-----
-
-exec-ddl
-ALTER TABLE rls ENABLE ROW LEVEL SECURITY;
-----
-
-exec-ddl
-CREATE POLICY select_policy_alice
-ON rls
-FOR SELECT
-TO alice
-USING (alice_has_access);
-----
-
-exec-ddl
-CREATE ROLE alice;
-----
-
 # --------------------------------------------------
 # SimplifySelectFilters
 # --------------------------------------------------
@@ -2270,9 +2246,9 @@ project
       │         │         ├── columns: tr.id:12!null tr.trid:13!null
       │         │         ├── fd: (12)-->(13)
       │         │         └── left-join (hash)
-      │         │              ├── columns: r.id:1 r.str16:4 tq.trid:8 tr.id:12!null tr.trid:13!null tr.str16:15!null
+      │         │              ├── columns: tr.id:12!null tr.trid:13!null tr.str16:15!null trid:18
       │         │              ├── multiplicity: left-rows(one-or-more), right-rows(zero-or-one)
-      │         │              ├── fd: ()-->(15), (12)-->(13), (1)==(8), (8)==(1)
+      │         │              ├── fd: ()-->(15), (12)-->(13)
       │         │              ├── select
       │         │              │    ├── columns: tr.id:12!null tr.trid:13!null tr.str16:15!null
       │         │              │    ├── key: (12)
@@ -2283,26 +2259,30 @@ project
       │         │              │    │    └── fd: (12)-->(13,15)
       │         │              │    └── filters
       │         │              │         └── tr.str16:15 = '12345' [outer=(15), constraints=(/15: [/'12345' - /'12345']; tight), fd=()-->(15)]
-      │         │              ├── inner-join (hash)
-      │         │              │    ├── columns: r.id:1!null r.str16:4!null tq.trid:8!null
-      │         │              │    ├── multiplicity: left-rows(zero-or-more), right-rows(zero-or-one)
-      │         │              │    ├── fd: ()-->(4), (1)==(8), (8)==(1)
-      │         │              │    ├── select
-      │         │              │    │    ├── columns: r.id:1!null r.str16:4!null
-      │         │              │    │    ├── key: (1)
-      │         │              │    │    ├── fd: ()-->(4)
-      │         │              │    │    ├── scan trrec [as=r]
-      │         │              │    │    │    ├── columns: r.id:1!null r.str16:4
+      │         │              ├── project
+      │         │              │    ├── columns: trid:18!null
+      │         │              │    ├── inner-join (hash)
+      │         │              │    │    ├── columns: r.id:1!null r.str16:4!null tq.trid:8!null
+      │         │              │    │    ├── multiplicity: left-rows(zero-or-more), right-rows(zero-or-one)
+      │         │              │    │    ├── fd: ()-->(4), (1)==(8), (8)==(1)
+      │         │              │    │    ├── select
+      │         │              │    │    │    ├── columns: r.id:1!null r.str16:4!null
       │         │              │    │    │    ├── key: (1)
-      │         │              │    │    │    └── fd: (1)-->(4)
+      │         │              │    │    │    ├── fd: ()-->(4)
+      │         │              │    │    │    ├── scan trrec [as=r]
+      │         │              │    │    │    │    ├── columns: r.id:1!null r.str16:4
+      │         │              │    │    │    │    ├── key: (1)
+      │         │              │    │    │    │    └── fd: (1)-->(4)
+      │         │              │    │    │    └── filters
+      │         │              │    │    │         └── r.str16:4 = '12345' [outer=(4), constraints=(/4: [/'12345' - /'12345']; tight), fd=()-->(4)]
+      │         │              │    │    ├── scan trtab4 [as=tq]
+      │         │              │    │    │    └── columns: tq.trid:8!null
       │         │              │    │    └── filters
-      │         │              │    │         └── r.str16:4 = '12345' [outer=(4), constraints=(/4: [/'12345' - /'12345']; tight), fd=()-->(4)]
-      │         │              │    ├── scan trtab4 [as=tq]
-      │         │              │    │    └── columns: tq.trid:8!null
-      │         │              │    └── filters
-      │         │              │         └── r.id:1 = tq.trid:8 [outer=(1,8), constraints=(/1: (/NULL - ]; /8: (/NULL - ]), fd=(1)==(8), (8)==(1)]
+      │         │              │    │         └── r.id:1 = tq.trid:8 [outer=(1,8), constraints=(/1: (/NULL - ]; /8: (/NULL - ]), fd=(1)==(8), (8)==(1)]
+      │         │              │    └── projections
+      │         │              │         └── tq.trid:8 [as=trid:18, outer=(8)]
       │         │              └── filters
-      │         │                   └── tr.id:12 = tq.trid:8 [outer=(8,12), constraints=(/8: (/NULL - ]; /12: (/NULL - ]), fd=(8)==(12), (12)==(8)]
+      │         │                   └── tr.id:12 = trid:18 [outer=(12,18), constraints=(/12: (/NULL - ]; /18: (/NULL - ]), fd=(12)==(18), (18)==(12)]
       │         ├── scan trm [as=m]
       │         │    └── columns: m.trid:21!null m.ts12:22!null
       │         └── filters
@@ -2367,9 +2347,9 @@ project
       │         │         ├── columns: tr.id:12!null tr.trid:13!null
       │         │         ├── fd: (12)-->(13)
       │         │         └── inner-join (hash)
-      │         │              ├── columns: r.id:1!null r.str16:4!null tq.trid:8!null tr.id:12!null tr.trid:13!null tr.str16:15!null
+      │         │              ├── columns: tr.id:12!null tr.trid:13!null tr.str16:15!null trid:18!null
       │         │              ├── multiplicity: left-rows(zero-or-more), right-rows(zero-or-one)
-      │         │              ├── fd: ()-->(4,15), (12)-->(13), (1)==(8,12), (8)==(1,12), (12)==(1,8), (4)==(15), (15)==(4)
+      │         │              ├── fd: ()-->(15), (12)-->(13), (12)==(18), (18)==(12)
       │         │              ├── select
       │         │              │    ├── columns: tr.id:12!null tr.trid:13!null tr.str16:15!null
       │         │              │    ├── key: (12)
@@ -2380,26 +2360,30 @@ project
       │         │              │    │    └── fd: (12)-->(13,15)
       │         │              │    └── filters
       │         │              │         └── tr.str16:15 = '12345' [outer=(15), constraints=(/15: [/'12345' - /'12345']; tight), fd=()-->(15)]
-      │         │              ├── inner-join (hash)
-      │         │              │    ├── columns: r.id:1!null r.str16:4!null tq.trid:8!null
-      │         │              │    ├── multiplicity: left-rows(zero-or-more), right-rows(zero-or-one)
-      │         │              │    ├── fd: ()-->(4), (1)==(8), (8)==(1)
-      │         │              │    ├── select
-      │         │              │    │    ├── columns: r.id:1!null r.str16:4!null
-      │         │              │    │    ├── key: (1)
-      │         │              │    │    ├── fd: ()-->(4)
-      │         │              │    │    ├── scan trrec [as=r]
-      │         │              │    │    │    ├── columns: r.id:1!null r.str16:4
+      │         │              ├── project
+      │         │              │    ├── columns: trid:18!null
+      │         │              │    ├── inner-join (hash)
+      │         │              │    │    ├── columns: r.id:1!null r.str16:4!null tq.trid:8!null
+      │         │              │    │    ├── multiplicity: left-rows(zero-or-more), right-rows(zero-or-one)
+      │         │              │    │    ├── fd: ()-->(4), (1)==(8), (8)==(1)
+      │         │              │    │    ├── select
+      │         │              │    │    │    ├── columns: r.id:1!null r.str16:4!null
       │         │              │    │    │    ├── key: (1)
-      │         │              │    │    │    └── fd: (1)-->(4)
+      │         │              │    │    │    ├── fd: ()-->(4)
+      │         │              │    │    │    ├── scan trrec [as=r]
+      │         │              │    │    │    │    ├── columns: r.id:1!null r.str16:4
+      │         │              │    │    │    │    ├── key: (1)
+      │         │              │    │    │    │    └── fd: (1)-->(4)
+      │         │              │    │    │    └── filters
+      │         │              │    │    │         └── r.str16:4 = '12345' [outer=(4), constraints=(/4: [/'12345' - /'12345']; tight), fd=()-->(4)]
+      │         │              │    │    ├── scan trtab4 [as=tq]
+      │         │              │    │    │    └── columns: tq.trid:8!null
       │         │              │    │    └── filters
-      │         │              │    │         └── r.str16:4 = '12345' [outer=(4), constraints=(/4: [/'12345' - /'12345']; tight), fd=()-->(4)]
-      │         │              │    ├── scan trtab4 [as=tq]
-      │         │              │    │    └── columns: tq.trid:8!null
-      │         │              │    └── filters
-      │         │              │         └── r.id:1 = tq.trid:8 [outer=(1,8), constraints=(/1: (/NULL - ]; /8: (/NULL - ]), fd=(1)==(8), (8)==(1)]
+      │         │              │    │         └── r.id:1 = tq.trid:8 [outer=(1,8), constraints=(/1: (/NULL - ]; /8: (/NULL - ]), fd=(1)==(8), (8)==(1)]
+      │         │              │    └── projections
+      │         │              │         └── tq.trid:8 [as=trid:18, outer=(8)]
       │         │              └── filters
-      │         │                   └── tr.id:12 = tq.trid:8 [outer=(8,12), constraints=(/8: (/NULL - ]; /12: (/NULL - ]), fd=(8)==(12), (12)==(8)]
+      │         │                   └── tr.id:12 = trid:18 [outer=(12,18), constraints=(/12: (/NULL - ]; /18: (/NULL - ]), fd=(12)==(18), (18)==(12)]
       │         ├── scan trm [as=m]
       │         │    └── columns: m.trid:21!null m.ts12:22!null
       │         └── filters
@@ -2460,9 +2444,9 @@ project
       │    │    │         ├── columns: tr.id:12!null tr.trid:13!null
       │    │    │         ├── fd: (12)-->(13)
       │    │    │         └── inner-join (hash)
-      │    │    │              ├── columns: r.id:1!null r.str16:4!null tq.trid:8!null tr.id:12!null tr.trid:13!null tr.str16:15!null
+      │    │    │              ├── columns: tr.id:12!null tr.trid:13!null tr.str16:15!null trid:18!null
       │    │    │              ├── multiplicity: left-rows(zero-or-more), right-rows(zero-or-one)
-      │    │    │              ├── fd: ()-->(4,15), (12)-->(13), (1)==(8,12), (8)==(1,12), (12)==(1,8), (4)==(15), (15)==(4)
+      │    │    │              ├── fd: ()-->(15), (12)-->(13), (12)==(18), (18)==(12)
       │    │    │              ├── select
       │    │    │              │    ├── columns: tr.id:12!null tr.trid:13!null tr.str16:15!null
       │    │    │              │    ├── key: (12)
@@ -2473,26 +2457,30 @@ project
       │    │    │              │    │    └── fd: (12)-->(13,15)
       │    │    │              │    └── filters
       │    │    │              │         └── tr.str16:15 = '12345' [outer=(15), constraints=(/15: [/'12345' - /'12345']; tight), fd=()-->(15)]
-      │    │    │              ├── inner-join (hash)
-      │    │    │              │    ├── columns: r.id:1!null r.str16:4!null tq.trid:8!null
-      │    │    │              │    ├── multiplicity: left-rows(zero-or-more), right-rows(zero-or-one)
-      │    │    │              │    ├── fd: ()-->(4), (1)==(8), (8)==(1)
-      │    │    │              │    ├── select
-      │    │    │              │    │    ├── columns: r.id:1!null r.str16:4!null
-      │    │    │              │    │    ├── key: (1)
-      │    │    │              │    │    ├── fd: ()-->(4)
-      │    │    │              │    │    ├── scan trrec [as=r]
-      │    │    │              │    │    │    ├── columns: r.id:1!null r.str16:4
+      │    │    │              ├── project
+      │    │    │              │    ├── columns: trid:18!null
+      │    │    │              │    ├── inner-join (hash)
+      │    │    │              │    │    ├── columns: r.id:1!null r.str16:4!null tq.trid:8!null
+      │    │    │              │    │    ├── multiplicity: left-rows(zero-or-more), right-rows(zero-or-one)
+      │    │    │              │    │    ├── fd: ()-->(4), (1)==(8), (8)==(1)
+      │    │    │              │    │    ├── select
+      │    │    │              │    │    │    ├── columns: r.id:1!null r.str16:4!null
       │    │    │              │    │    │    ├── key: (1)
-      │    │    │              │    │    │    └── fd: (1)-->(4)
+      │    │    │              │    │    │    ├── fd: ()-->(4)
+      │    │    │              │    │    │    ├── scan trrec [as=r]
+      │    │    │              │    │    │    │    ├── columns: r.id:1!null r.str16:4
+      │    │    │              │    │    │    │    ├── key: (1)
+      │    │    │              │    │    │    │    └── fd: (1)-->(4)
+      │    │    │              │    │    │    └── filters
+      │    │    │              │    │    │         └── r.str16:4 = '12345' [outer=(4), constraints=(/4: [/'12345' - /'12345']; tight), fd=()-->(4)]
+      │    │    │              │    │    ├── scan trtab4 [as=tq]
+      │    │    │              │    │    │    └── columns: tq.trid:8!null
       │    │    │              │    │    └── filters
-      │    │    │              │    │         └── r.str16:4 = '12345' [outer=(4), constraints=(/4: [/'12345' - /'12345']; tight), fd=()-->(4)]
-      │    │    │              │    ├── scan trtab4 [as=tq]
-      │    │    │              │    │    └── columns: tq.trid:8!null
-      │    │    │              │    └── filters
-      │    │    │              │         └── r.id:1 = tq.trid:8 [outer=(1,8), constraints=(/1: (/NULL - ]; /8: (/NULL - ]), fd=(1)==(8), (8)==(1)]
+      │    │    │              │    │         └── r.id:1 = tq.trid:8 [outer=(1,8), constraints=(/1: (/NULL - ]; /8: (/NULL - ]), fd=(1)==(8), (8)==(1)]
+      │    │    │              │    └── projections
+      │    │    │              │         └── tq.trid:8 [as=trid:18, outer=(8)]
       │    │    │              └── filters
-      │    │    │                   └── tr.id:12 = tq.trid:8 [outer=(8,12), constraints=(/8: (/NULL - ]; /12: (/NULL - ]), fd=(8)==(12), (12)==(8)]
+      │    │    │                   └── tr.id:12 = trid:18 [outer=(12,18), constraints=(/12: (/NULL - ]; /18: (/NULL - ]), fd=(12)==(18), (18)==(12)]
       │    │    ├── scan trm [as=m]
       │    │    │    └── columns: m.trid:21!null m.ts12:22!null
       │    │    └── filters
@@ -2501,64 +2489,3 @@ project
       │         └── row-number [as=row_num:25]
       └── filters
            └── row_num:25 <= 100 [outer=(25), constraints=(/25: (/NULL - /100]; tight)]
-
-# --------------------------------------------------
-# PushLeakproofFiltersIntoPermeableBarrier
-# --------------------------------------------------
-
-exec-ddl
-SET ROLE alice;
-----
-
-# The 'y/0 = 0' predicate is not leakproof, so it should exist outside of the
-# barrier that includes the injected RLS filter.
-norm expect=PushLeakproofFiltersIntoPermeableBarrier
-SELECT * FROM rls WHERE y = 20 AND y/0 = 0;
-----
-project
- ├── columns: x:1!null y:2!null alice_has_access:3!null
- ├── immutable
- ├── key: (1)
- ├── fd: ()-->(2,3)
- └── select
-      ├── columns: x:1!null y:2!null alice_has_access:3!null crdb_internal_mvcc_timestamp:4 tableoid:5
-      ├── immutable
-      ├── key: (1)
-      ├── fd: ()-->(2,3), (1)-->(4,5)
-      ├── barrier
-      │    ├── columns: x:1!null y:2!null alice_has_access:3!null crdb_internal_mvcc_timestamp:4 tableoid:5
-      │    ├── key: (1)
-      │    ├── fd: ()-->(2,3), (1)-->(4,5)
-      │    └── select
-      │         ├── columns: x:1!null y:2!null alice_has_access:3!null crdb_internal_mvcc_timestamp:4 tableoid:5
-      │         ├── key: (1)
-      │         ├── fd: ()-->(2,3), (1)-->(4,5)
-      │         ├── scan rls
-      │         │    ├── columns: x:1!null y:2 alice_has_access:3 crdb_internal_mvcc_timestamp:4 tableoid:5
-      │         │    ├── key: (1)
-      │         │    └── fd: (1)-->(2-5)
-      │         └── filters
-      │              ├── alice_has_access:3 [outer=(3), constraints=(/3: [/true - /true]; tight), fd=()-->(3)]
-      │              └── y:2 = 20 [outer=(2), constraints=(/2: [/20 - /20]; tight), fd=()-->(2)]
-      └── filters
-           └── (20 / 0) = 0 [immutable]
-
-# All filters are leakproof, so barrier pushed entirely out of the select.
-norm expect=PushLeakproofFiltersIntoPermeableBarrier
-SELECT * FROM rls WHERE y = 20;
-----
-barrier
- ├── columns: x:1!null y:2!null alice_has_access:3!null
- ├── key: (1)
- ├── fd: ()-->(2,3)
- └── select
-      ├── columns: x:1!null y:2!null alice_has_access:3!null
-      ├── key: (1)
-      ├── fd: ()-->(2,3)
-      ├── scan rls
-      │    ├── columns: x:1!null y:2 alice_has_access:3
-      │    ├── key: (1)
-      │    └── fd: (1)-->(2,3)
-      └── filters
-           ├── alice_has_access:3 [outer=(3), constraints=(/3: [/true - /true]; tight), fd=()-->(3)]
-           └── y:2 = 20 [outer=(2), constraints=(/2: [/20 - /20]; tight), fd=()-->(2)]
