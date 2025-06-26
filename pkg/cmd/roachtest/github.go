@@ -14,9 +14,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/bazci/githubpost/issues"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestflags"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/tests"
 	"github.com/cockroachdb/cockroach/pkg/internal/team"
 	rperrors "github.com/cockroachdb/cockroach/pkg/roachprod/errors"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
@@ -43,7 +43,7 @@ func newGithubIssues(disable bool, c *clusterImpl, vmCreateOpts *vm.CreateOpts) 
 
 // generateHelpCommand creates a HelpCommand for createPostRequest
 func generateHelpCommand(
-	testName string, clusterName string, cloud spec.Cloud, start time.Time, end time.Time,
+	testName string, clusterName string, cloud string, start time.Time, end time.Time,
 ) func(renderer *issues.Renderer) {
 	return func(renderer *issues.Renderer) {
 		issues.HelpCommandAsLink(
@@ -75,19 +75,19 @@ func generateHelpCommand(
 
 func failuresAsErrorWithOwnership(failures []failure) *registry.ErrorWithOwnership {
 	var transientError rperrors.TransientError
-	var errWithOwner registry.ErrorWithOwnership
+	var err registry.ErrorWithOwnership
 	if failuresMatchingError(failures, &transientError) {
-		errWithOwner = registry.ErrorWithOwner(
+		err = registry.ErrorWithOwner(
 			registry.OwnerTestEng, transientError,
 			registry.WithTitleOverride(transientError.Cause),
 			registry.InfraFlake,
 		)
 
-		return &errWithOwner
+		return &err
 	}
 
-	if failuresMatchingError(failures, &errWithOwner) {
-		return &errWithOwner
+	if errWithOwner := failuresSpecifyOwner(failures); errWithOwner != nil {
+		return errWithOwner
 	}
 
 	return nil
@@ -179,6 +179,7 @@ func (g *githubIssues) createPostRequest(
 	params map[string]string,
 ) (issues.PostRequest, error) {
 	var mention []string
+	var projColID int
 
 	var (
 		issueOwner    = spec.Owner
@@ -248,8 +249,11 @@ func (g *githubIssues) createPostRequest(
 			if mentionTeam {
 				mention = append(mention, "@"+string(alias))
 			}
-			labels = append(labels, teams[alias].Labels()...)
+			if label := teams[alias].Label; label != "" {
+				labels = append(labels, label)
+			}
 		}
+		projColID = teams[sl[0]].TriageColumnID
 	}
 
 	branch := os.Getenv("TC_BUILD_BRANCH")
@@ -284,6 +288,7 @@ func (g *githubIssues) createPostRequest(
 
 	return issues.PostRequest{
 		MentionOnCreate: mention,
+		ProjectColumnID: projColID,
 		PackageName:     "roachtest",
 		TestName:        issueName,
 		Labels:          labels,
@@ -308,8 +313,7 @@ func (g *githubIssues) MaybePost(
 
 	postRequest, err := g.createPostRequest(
 		t.Name(), t.start, t.end, t.spec, t.failures(),
-		message,
-		roachtestutil.UsingRuntimeAssertions(t), t.goCoverEnabled, params,
+		message, tests.UsingRuntimeAssertions(t), t.goCoverEnabled, params,
 	)
 
 	if err != nil {

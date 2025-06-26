@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
+	"path"
 	"path/filepath"
 
 	"github.com/cockroachdb/cockroach/pkg/cloud/amazon"
@@ -36,7 +38,7 @@ for l in  a b c; do
   sudo microceph disk add --wipe "/dev/sdi${l}"
 done`
 
-// cephCleanup removes microceph and the loop devices.
+// cephCleanup remove microceph and the loop devices.
 const cephCleanup = `
 #!/bin/bash
 sudo microceph disable rgw
@@ -62,7 +64,7 @@ type cephManager struct {
 	cephNodes option.NodeListOption // The nodes within the cluster used by Ceph.
 	key       string
 	secret    string
-	secure    s3CloneSecureOption
+	secure    bool
 	version   string
 }
 
@@ -77,7 +79,7 @@ func (m cephManager) getBackupURI(ctx context.Context, dest string) (string, err
 	}
 	m.t.Status("cephNode: ", addr)
 	endpointURL := `http://` + addr[0]
-	if m.secure != s3ClonePlain {
+	if m.secure {
 		endpointURL = `https://` + addr[0]
 	}
 	q := make(url.Values)
@@ -87,9 +89,6 @@ func (m cephManager) getBackupURI(ctx context.Context, dest string) (string, err
 	// Region is required in the URL, but not used in Ceph.
 	q.Add(amazon.S3RegionParam, "dummy")
 	q.Add(amazon.AWSEndpointParam, endpointURL)
-	if m.secure == s3CloneTLSWithSkipVerify {
-		q.Add(amazon.AWSSkipTLSVerify, "true")
-	}
 	uri := fmt.Sprintf("s3://%s/%s?%s", m.bucket, dest, q.Encode())
 	return uri, nil
 }
@@ -118,9 +117,9 @@ func (m cephManager) install(ctx context.Context) {
 	// Start the Ceph Object Gateway, also known as RADOS Gateway (RGW). RGW is
 	// an object storage interface to provide applications with a RESTful
 	// gateway to Ceph storage clusters, compatible with the S3 APIs.
+	// We are leveraging the node certificates created by cockroach.
 	rgwCmd := "sudo microceph enable rgw "
-	if m.secure != s3ClonePlain {
-		// We are leveraging the node certificates created by cockroach.
+	if m.secure {
 		rgwCmd = rgwCmd + ` --ssl-certificate="$(base64 -w0 certs/node.crt)" --ssl-private-key="$(base64 -w0 certs/node.key)"`
 	}
 	m.run(ctx, `starting object gateway`, rgwCmd)
@@ -133,7 +132,7 @@ func (m cephManager) install(ctx context.Context) {
 
 	m.run(ctx, `install s3cmd`, `sudo apt install -y s3cmd`)
 	s3cmd := s3cmdNoSsl
-	if m.secure != s3ClonePlain {
+	if m.secure {
 		s3cmd = s3cmdSsl
 	}
 	m.run(ctx, `creating bucket`,
@@ -145,10 +144,32 @@ func (m cephManager) install(ctx context.Context) {
 
 // maybeInstallCa adds a custom ca in the CockroachDB cluster.
 func (m cephManager) maybeInstallCa(ctx context.Context) error {
-	if m.secure != s3CloneTLS {
+	if !m.secure {
 		return nil
 	}
-	return installCa(ctx, m.t, m.c)
+	localCertsDir, err := os.MkdirTemp("", "roachtest-certs")
+	if err != nil {
+		return err
+	}
+	// get the ca file from one of the nodes.
+	caFile := path.Join(localCertsDir, "ca.crt")
+	conn := m.c.Conn(ctx, m.t.L(), 1)
+	defer conn.Close()
+	if err := m.c.Get(ctx, m.t.L(), "certs/ca.crt", caFile, m.c.Node(1)); err != nil {
+		return err
+	}
+	caCert, err := os.ReadFile(caFile)
+	if err != nil {
+		return err
+	}
+	// Disabling caching for Custom CA, see https://github.com/cockroachdb/cockroach/issues/125051.
+	if _, err := conn.ExecContext(ctx, "set cluster setting cloudstorage.s3.session_reuse.enabled = false"); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, "set cluster setting cloudstorage.http.custom_ca=$1", caCert); err != nil {
+		return err
+	}
+	return nil
 }
 
 // put creates a file in the ceph node with the given content.
