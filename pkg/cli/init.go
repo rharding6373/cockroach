@@ -33,16 +33,7 @@ you would use for the sql command).
 	RunE: clierrorplus.MaybeDecorateError(runInit),
 }
 
-var initCmdOptions = struct {
-	virtualized      bool
-	virtualizedEmpty bool
-}{}
-
 func runInit(cmd *cobra.Command, args []string) error {
-	if initCmdOptions.virtualized && initCmdOptions.virtualizedEmpty {
-		return errors.Newf("only one of --virtualized and --virtualized-empty can be used")
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -50,24 +41,15 @@ func runInit(cmd *cobra.Command, args []string) error {
 	if err := dialAndCheckHealth(ctx); err != nil {
 		return err
 	}
-	conn, finish, err := newClientConn(ctx, serverCfg)
+	conn, finish, err := getClientGRPCConn(ctx, serverCfg)
 	if err != nil {
 		return err
 	}
 	defer finish()
 
-	typ := serverpb.InitType_NONE
-	if initCmdOptions.virtualized {
-		typ = serverpb.InitType_VIRTUALIZED
-	} else if initCmdOptions.virtualizedEmpty {
-		typ = serverpb.InitType_VIRTUALIZED_EMPTY
-	}
-
 	// Actually perform cluster initialization.
-	c := conn.NewInitClient()
-	if _, err = c.Bootstrap(ctx, &serverpb.BootstrapRequest{
-		InitType: typ,
-	}); err != nil {
+	c := serverpb.NewInitClient(conn)
+	if _, err = c.Bootstrap(ctx, &serverpb.BootstrapRequest{}); err != nil {
 		return err
 	}
 
@@ -89,7 +71,7 @@ func dialAndCheckHealth(ctx context.Context) error {
 		// (Attempt to) establish the gRPC connection. If that fails,
 		// it may be that the server hasn't started to listen yet, in
 		// which case we'll retry.
-		conn, finish, err := newClientConn(ctx, serverCfg)
+		conn, finish, err := getClientGRPCConn(ctx, serverCfg)
 		if err != nil {
 			return err
 		}
@@ -98,7 +80,7 @@ func dialAndCheckHealth(ctx context.Context) error {
 		// Access the /health endpoint. Until/unless this succeeds, the
 		// node is not yet fully initialized and ready to accept
 		// Bootstrap requests.
-		ac := conn.NewAdminClient()
+		ac := serverpb.NewAdminClient(conn)
 		_, err = ac.Health(ctx, &serverpb.HealthRequest{})
 		return err
 	}

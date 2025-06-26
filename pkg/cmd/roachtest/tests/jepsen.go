@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
-	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 )
 
@@ -48,7 +47,7 @@ a pull request for tc-nightly-main branch and after merging build a new
 artifact using:
 
 # install build dependencies and build tools
-sudo apt-get -qqy install openjdk-17-jre openjdk-17-jre-headless libjna-java gnuplot
+sudo apt-get -qqy install openjdk-8-jre openjdk-8-jre-headless libjna-java gnuplot
 curl -o lein https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein
 chmod +x lein
 
@@ -74,10 +73,10 @@ to running roachtest and update repository URLs in the file to your liking.
 const envBuildJepsen = "ROACHTEST_BUILD_JEPSEN"
 
 const jepsenRepo = "https://github.com/cockroachdb/jepsen"
-const repoBranch = "tc-nightly-main"
+const repoBranch = "tc-nightly"
 
 const gcpPath = "https://storage.googleapis.com/cockroach-jepsen"
-const binaryVersion = "0.1.0-6699eb4-standalone"
+const binaryVersion = "0.1.0-cdeef40-standalone"
 
 var jepsenNemeses = []struct {
 	name, config string
@@ -107,11 +106,6 @@ func initJepsen(ctx context.Context, t test.Test, c cluster.Cluster, j jepsenCon
 		return
 	}
 
-	// Jepsen requires DNS resolution to work, so we need to set up /etc/hosts.
-	if err := c.PopulateEtcHosts(ctx, t.L()); err != nil {
-		t.Fatal(err)
-	}
-
 	controller := c.Node(c.Spec().NodeCount)
 	workers := c.Range(1, c.Spec().NodeCount-1)
 
@@ -119,14 +113,14 @@ func initJepsen(ctx context.Context, t test.Test, c cluster.Cluster, j jepsenCon
 	// so do it before the initialization check for ease of iteration.
 	if err := c.GitClone(
 		ctx, t.L(),
-		jepsenRepo, "/mnt/data1/jepsen", repoBranch, controller,
+		"https://github.com/cockroachdb/jepsen", "/mnt/data1/jepsen", "tc-nightly", controller,
 	); err != nil {
 		t.Fatal(err)
 	}
 	j.prepareBinary(ctx, t, c, controller)
 
 	// Check to see if the cluster has already been initialized.
-	if err := c.RunE(ctx, option.WithNodes(c.Node(1)), "test -e jepsen_initialized"); err == nil {
+	if err := c.RunE(ctx, c.Node(1), "test -e jepsen_initialized"); err == nil {
 		t.L().Printf("cluster already initialized\n")
 		return
 	}
@@ -137,7 +131,7 @@ func initJepsen(ctx context.Context, t test.Test, c cluster.Cluster, j jepsenCon
 	// this is the only log collection that is done. Otherwise, we
 	// perform a second log collection in this test that varies
 	// depending on whether the test passed or not.
-	c.Run(ctx, option.WithNodes(c.All()), "mkdir", "-p", "logs")
+	c.Run(ctx, c.All(), "mkdir", "-p", "logs")
 
 	// `apt-get update` is slow but necessary: the base image has
 	// outdated information and refers to package versions that are no
@@ -145,15 +139,8 @@ func initJepsen(ctx context.Context, t test.Test, c cluster.Cluster, j jepsenCon
 	//
 	// TODO(bdarnell): Create a new base image with the packages we need
 	// instead of installing them on every run.
-	c.Run(ctx, option.WithNodes(c.All()), "sh", "-c", `"sudo apt-get -y update > logs/apt-upgrade.log 2>&1"`)
-	c.Run(ctx, option.WithNodes(c.All()), "sh", "-c", `"sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade -o Dpkg::Options::='--force-confold' -o DPkg::options::='--force-confdef' > logs/apt-upgrade.log 2>&1"`)
-
-	// Jepsen artifact collection requires bzip2, which is not installed
-	// on the base image.
-	t.L().Printf("installing bzip2")
-	if err := c.Install(ctx, t.L(), c.All(), "bzip2"); err != nil {
-		t.Fatal(err)
-	}
+	c.Run(ctx, c.All(), "sh", "-c", `"sudo apt-get -y update > logs/apt-upgrade.log 2>&1"`)
+	c.Run(ctx, c.All(), "sh", "-c", `"sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade -o Dpkg::Options::='--force-confold' -o DPkg::options::='--force-confdef' > logs/apt-upgrade.log 2>&1"`)
 
 	// TODO(bdarnell): copying the raw binary and compressing it on the
 	// other side is silly, but this lets us avoid platform-specific
@@ -161,13 +148,12 @@ func initJepsen(ctx context.Context, t test.Test, c cluster.Cluster, j jepsenCon
 	// tar. To be able to run from a macOS host with BSD tar we'd need
 	// Jepsen expects a tarball that expands to cockroach/cockroach
 	// (which is not how our official builds are laid out).
-	c.Run(ctx, option.WithNodes(c.All()), "tar --transform s,^,cockroach/, -c -z -f cockroach.tgz cockroach")
-
-	deps := `"sudo DEBIAN_FRONTEND=noninteractive apt-get -qqy install openjdk-17-jre openjdk-17-jre-headless libjna-java gnuplot > /dev/null 2>&1"`
+	c.Run(ctx, c.All(), "tar --transform s,^,cockroach/, -c -z -f cockroach.tgz cockroach")
 
 	// Install Jepsen's prereqs on the controller.
 	if result, err := c.RunWithDetailsSingleNode(
-		ctx, t.L(), option.WithNodes(controller), "sh", "-c", deps,
+		ctx, t.L(), controller, "sh", "-c",
+		`"sudo DEBIAN_FRONTEND=noninteractive apt-get -qqy install openjdk-8-jre openjdk-8-jre-headless libjna-java gnuplot > /dev/null 2>&1"`,
 	); err != nil {
 		if result.RemoteExitStatus == 100 {
 			t.Skip("apt-get failure (#31944)", result.Stdout+result.Stderr)
@@ -180,11 +166,11 @@ func initJepsen(ctx context.Context, t test.Test, c cluster.Cluster, j jepsenCon
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.Run(ctx, option.WithNodes(controller), "sh", "-c",
+	c.Run(ctx, controller, "sh", "-c",
 		`"test -f .ssh/id_rsa || ssh-keygen -f .ssh/id_rsa -t rsa -m pem -N ''"`)
 	// Convert OpenSSH private key to old format that jsch used by jepsen understands.
 	// This is needed if key already existed or inherited so that we can continue.
-	c.Run(ctx, option.WithNodes(controller), "sh", "-c", `"ssh-keygen -p -f .ssh/id_rsa -m pem -P '' -N ''"`)
+	c.Run(ctx, controller, "sh", "-c", `"ssh-keygen -p -f .ssh/id_rsa -m pem -P '' -N ''"`)
 
 	pubSSHKey := filepath.Join(tempDir, "id_rsa.pub")
 	if err := c.Get(ctx, t.L(), ".ssh/id_rsa.pub", pubSSHKey, controller); err != nil {
@@ -192,15 +178,19 @@ func initJepsen(ctx context.Context, t test.Test, c cluster.Cluster, j jepsenCon
 	}
 	// TODO(bdarnell): make this idempotent instead of filling up .ssh configs.
 	c.Put(ctx, pubSSHKey, "controller_id_rsa.pub", workers)
-	c.Run(ctx, option.WithNodes(workers), "sh", "-c", `"cat controller_id_rsa.pub >> .ssh/authorized_keys"`)
+	c.Run(ctx, workers, "sh", "-c", `"cat controller_id_rsa.pub >> .ssh/authorized_keys"`)
 	// Prime the known hosts file, and use the unhashed format to
 	// work around JSCH auth error: https://github.com/jepsen-io/jepsen/blob/master/README.md
-	for _, worker := range workers {
-		c.Run(ctx, option.WithNodes(controller), "sh", "-c", fmt.Sprintf(`"ssh-keyscan -t rsa {ip:%d} >> .ssh/known_hosts"`, worker))
+	ips, err := c.InternalIP(ctx, t.L(), workers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ip := range ips {
+		c.Run(ctx, controller, "sh", "-c", fmt.Sprintf(`"ssh-keyscan -t rsa %s >> .ssh/known_hosts"`, ip))
 	}
 
 	t.L().Printf("cluster initialization complete\n")
-	c.Run(ctx, option.WithNodes(c.Node(1)), "touch jepsen_initialized")
+	c.Run(ctx, c.Node(1), "touch jepsen_initialized")
 }
 
 type jepsenConfig struct {
@@ -212,7 +202,7 @@ type jepsenConfig struct {
 }
 
 func makeJepsenConfig() jepsenConfig {
-	if os.Getenv(envBuildJepsen) != "" {
+	if e := os.Getenv(envBuildJepsen); e != "" {
 		return jepsenConfig{
 			buildFromSource: true,
 			repoURL:         jepsenRepo,
@@ -240,7 +230,7 @@ func (j jepsenConfig) prepareBinary(
 		if err := c.GitClone(ctx, t.L(), j.repoURL, "/mnt/data1/jepsen", j.branch, ctr); err != nil {
 			t.Fatal(err)
 		}
-		c.Run(ctx, option.WithNodes(ctr),
+		c.Run(ctx, ctr,
 			"test -x lein || (curl -o lein https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein && chmod +x lein)")
 	} else {
 		var err error
@@ -248,7 +238,7 @@ func (j jepsenConfig) prepareBinary(
 			if ctx.Err() != nil {
 				t.Fatal()
 			}
-			err = c.RunE(ctx, option.WithNodes(ctr), "bash", "-e", "-c",
+			err = c.RunE(ctx, ctr, "bash", "-e", "-c",
 				fmt.Sprintf(`"mkdir -p '/mnt/data1/jepsen/cockroachdb' && curl -fsSL '%s/%s' -o '/mnt/data1/jepsen/cockroachdb/%s'"`,
 					j.binaryURL, j.binaryName(), j.binaryName()))
 			if err == nil {
@@ -268,8 +258,6 @@ func (j jepsenConfig) startTest(
 	ctx context.Context, t test.Test, run func(args ...string) error, testArgs string,
 ) <-chan error {
 	errCh := make(chan error, 1)
-	var script string
-
 	if j.buildFromSource {
 		// Install the jepsen package (into ~/.m2) before running tests in
 		// the cockroach package. Clojure doesn't really understand
@@ -291,28 +279,18 @@ func (j jepsenConfig) startTest(
 			}
 			t.Fatalf("error installing Jepsen deps: %+v", err)
 		}
-		// N.B. jepsen exits with `255` if it encounters an unhandled exception.
-		// (See https://github.com/cockroachdb/cockroach/issues/99681)
-		// 255 is designated as SSH, hence we remap it to 254 below. (See errors.ClassifyCmdError)
-		script = fmt.Sprintf(`"
-cd /mnt/data1/jepsen/cockroachdb &&
-set -eo pipefail &&
-rc=0; ~/lein run %s > invoke.log 2>&1 || rc=\$?;
-exit \$(( rc == 255 ? 254 : rc ))"`, testArgs)
+		go func() {
+			errCh <- run("bash", "-e", "-c", fmt.Sprintf(
+				`"cd /mnt/data1/jepsen/cockroachdb && set -eo pipefail && ~/lein run %s > invoke.log 2>&1"`,
+				testArgs))
+		}()
 	} else {
-		// N.B. jepsen exits with `255` if it encounters an unhandled exception.
-		// (See https://github.com/cockroachdb/cockroach/issues/99681)
-		// 255 is designated as SSH, hence we remap it to 254 below. (See errors.ClassifyCmdError)
-		script = fmt.Sprintf(`"
-cd /mnt/data1/jepsen/cockroachdb &&
-set -eo pipefail &&
-rc=0; java -jar %s %s > invoke.log 2>&1 || rc=\$?;
-exit \$(( rc == 255 ? 254 : rc ))"`, j.binaryName(), testArgs)
+		go func() {
+			errCh <- run("bash", "-e", "-c", fmt.Sprintf(
+				`"cd /mnt/data1/jepsen/cockroachdb && set -eo pipefail && java -jar %s %s > invoke.log 2>&1"`,
+				j.binaryName(), testArgs))
+		}()
 	}
-	t.Go(func(context.Context, *logger.Logger) error {
-		errCh <- run("bash", "-e", "-c", script)
-		return nil
-	})
 	return errCh
 }
 
@@ -325,8 +303,12 @@ func runJepsen(ctx context.Context, t test.Test, c cluster.Cluster, testName, ne
 
 	// Get the IP addresses for all our workers.
 	var nodeFlags []string
-	for _, node := range c.Range(1, c.Spec().NodeCount-1) {
-		nodeFlags = append(nodeFlags, fmt.Sprintf("-n {ip:%d}", node))
+	ips, err := c.InternalIP(ctx, t.L(), c.Range(1, c.Spec().NodeCount-1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ip := range ips {
+		nodeFlags = append(nodeFlags, "-n "+ip)
 	}
 	nodesStr := strings.Join(nodeFlags, " ")
 
@@ -336,7 +318,7 @@ func runJepsen(ctx context.Context, t test.Test, c cluster.Cluster, testName, ne
 			t.L().Printf("> %s\n", strings.Join(args, " "))
 			return nil
 		}
-		return c.RunE(ctx, option.WithNodes(node), args...)
+		return c.RunE(ctx, node, args...)
 	}
 
 	run := func(c cluster.Cluster, ctx context.Context, node option.NodeListOption, args ...string) {
@@ -425,7 +407,7 @@ func runJepsen(ctx context.Context, t test.Test, c cluster.Cluster, testName, ne
 		}
 
 		if result, err := c.RunWithDetailsSingleNode(
-			ctx, t.L(), option.WithNodes(controller),
+			ctx, t.L(), controller,
 			// -h causes tar to follow symlinks; needed by the "latest" symlink.
 			// -f- sends the output to stdout, we read it and save it to a local file.
 			"tar -chj --ignore-failed-read -C /mnt/data1/jepsen/cockroachdb -f- store/latest invoke.log",

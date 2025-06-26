@@ -40,14 +40,15 @@ type BulkAdderOptions struct {
 
 	// DisallowShadowingBelow controls whether shadowing of existing keys is
 	// permitted when the SSTables produced by this adder are ingested. See the
-	// comment on kvpb.AddSSTableRequest for more details.
+	// comment on kvpb.AddSSTableRequest for more details. Note that if this is
+	// set to a non-empty timestamp, the older flag DisallowShadowing will be set
+	// on all requests as well, so callers should expect older nodes to handle any
+	// requests accordingly or check the MVCCAddSSTable version gate.
 	DisallowShadowingBelow hlc.Timestamp
 
 	// BatchTimestamp is the timestamp to use on AddSSTable requests (which can be
 	// different from the timestamp used to construct the adder which is what is
 	// actually applied to each key).
-	//
-	// TODO(jeffswenson): this setting is a no-op. See comment in `MakeBulkAdder`.
 	BatchTimestamp hlc.Timestamp
 
 	// WriteAtBatchTimestamp will rewrite the SST to use the batch timestamp, even
@@ -64,15 +65,6 @@ type BulkAdderOptions struct {
 	// the first buffer to pick split points in the hope it is a representative
 	// sample of the overall input.
 	InitialSplitsIfUnordered int
-
-	// ImportEpoch specifies the ImportEpoch of the table the BulkAdder
-	// is ingesting data into as part of an IMPORT INTO job. If specified, the Bulk
-	// Adder's SSTBatcher will write the import epoch to each versioned value's
-	// metadata.
-	//
-	// Callers should check that the cluster is at or above
-	// version 24.1 before setting this option.
-	ImportEpoch uint32
 }
 
 // BulkAdderFactory describes a factory function for BulkAdders.

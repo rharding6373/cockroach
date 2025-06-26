@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/errors"
@@ -60,7 +61,7 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 		BufferedWrites:  &bt,
 		MaxFileSize:     &zeroByteSize,
 		MaxGroupSize:    &zeroByteSize,
-		FilePermissions: func() *FilePermissions { s := DefaultFilePerms; return &s }(),
+		FilePermissions: func() *FilePermissions { s := FilePermissions(0o644); return &s }(),
 		CommonSinkConfig: CommonSinkConfig{
 			Format:      func() *string { s := DefaultFileFormat; return &s }(),
 			Criticality: &bt,
@@ -111,31 +112,14 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 		}(),
 		Compression: &GzipCompression,
 	}
-	baseOtlpDefaults := OtlpDefaults{
-		CommonSinkConfig: CommonSinkConfig{
-			Format: func() *string { s := DefaultOtlpFormat; return &s }(),
-			Buffering: CommonBufferSinkConfigWrapper{
-				CommonBufferSinkConfig: CommonBufferSinkConfig{
-					MaxStaleness:     &defaultBufferedStaleness,
-					FlushTriggerSize: &defaultFlushTriggerSize,
-					MaxBufferSize:    &defaultMaxBufferSize,
-					Format:           &bufferFmt,
-				},
-			},
-		},
-		Insecure:    &bf,
-		Compression: &GzipCompression,
-	}
 
 	propagateCommonDefaults(&baseFileDefaults.CommonSinkConfig, baseCommonSinkConfig)
 	propagateCommonDefaults(&baseFluentDefaults.CommonSinkConfig, baseCommonSinkConfig)
 	propagateCommonDefaults(&baseHTTPDefaults.CommonSinkConfig, baseCommonSinkConfig)
-	propagateCommonDefaults(&baseOtlpDefaults.CommonSinkConfig, baseCommonSinkConfig)
 
 	propagateFileDefaults(&c.FileDefaults, baseFileDefaults)
 	propagateFluentDefaults(&c.FluentDefaults, baseFluentDefaults)
 	propagateHTTPDefaults(&c.HTTPDefaults, baseHTTPDefaults)
-	propagateOtlpDefaults(&c.OtlpDefaults, baseOtlpDefaults)
 
 	// Normalize the directory.
 	if err := normalizeDir(&c.FileDefaults.Dir); err != nil {
@@ -174,17 +158,6 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 		fc.sinkName = sinkName
 		if err := c.validateHTTPSinkConfig(fc); err != nil {
 			fmt.Fprintf(&errBuf, "http server %q: %v\n", sinkName, err)
-		}
-	}
-
-	for sinkName, fc := range c.Sinks.OtlpServers {
-		if fc == nil {
-			fc = &OtlpSinkConfig{Channels: SelectChannels()}
-			c.Sinks.OtlpServers[sinkName] = fc
-		}
-		fc.SinkName = sinkName
-		if err := c.validateOtlpSinkConfig(fc); err != nil {
-			fmt.Fprintf(&errBuf, "otlp server %q: %v\n", sinkName, err)
 		}
 	}
 
@@ -269,18 +242,6 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 		// have a filter yet.
 		if err := fc.Channels.Validate(fc.Filter); err != nil {
 			fmt.Fprintf(&errBuf, "http server %q: %v\n", sinkName, err)
-			continue
-		}
-	}
-
-	for serverName, fc := range c.Sinks.OtlpServers {
-		if len(fc.Channels.Filters) == 0 {
-			fmt.Fprintf(&errBuf, "otlp server %q: no channel selected\n", serverName)
-		}
-		// Propagate the sink-wide default filter to all channels that don't
-		// have a filter yet.
-		if err := fc.Channels.Validate(fc.Filter); err != nil {
-			fmt.Fprintf(&errBuf, "otlp server %q: %v\n", serverName, err)
 			continue
 		}
 	}
@@ -408,18 +369,14 @@ func (c *Config) newFileSinkConfig(groupName string) *FileSinkConfig {
 func (c *Config) validateFileSinkConfig(fc *FileSinkConfig) error {
 	propagateFileDefaults(&fc.FileDefaults, c.FileDefaults)
 	if !fc.Buffering.IsNone() {
-		if fc.BufferedWrites != nil && *fc.BufferedWrites {
-			return errors.Newf(`Unable to use "buffered-writes" in conjunction with a "buffering" configuration. ` +
-				`These configuration options are mutually exclusive.`)
-		}
-		if *fc.Auditable {
-			return errors.Newf(`File-based audit logging cannot coexist with buffering configuration. ` +
-				`Disable either the buffering configuration ("buffering") or auditable log ("auditable") configuration.`)
-		}
-		// To preserve the format of log files, avoid additional formatting in the
-		// buffering configuration.
-		fmtNone := BufferFmtNone
-		fc.Buffering.Format = &fmtNone
+		// We cannot use unimplemented.WithIssue() here because of a
+		// circular dependency.
+		err := errors.UnimplementedError(
+			errors.IssueLink{IssueURL: build.MakeIssueURL(72452)},
+			`unimplemented: "buffering" not yet supported for file-groups`)
+		err = errors.WithHint(err, `Use "buffered-writes".`)
+		err = errors.WithTelemetry(err, "#72452")
+		return err
 	}
 	if fc.Dir != c.FileDefaults.Dir {
 		// A directory was specified explicitly. Normalize it.
@@ -518,20 +475,6 @@ func (c *Config) validateHTTPSinkConfig(hsc *HTTPSinkConfig) error {
 	return c.ValidateCommonSinkConfig(hsc.CommonSinkConfig)
 }
 
-func (c *Config) validateOtlpSinkConfig(otsc *OtlpSinkConfig) error {
-	propagateOtlpDefaults(&otsc.OtlpDefaults, c.OtlpDefaults)
-	otsc.Address = strings.TrimSpace(otsc.Address)
-	if len(otsc.Address) == 0 {
-		return errors.New("address cannot be empty")
-	}
-
-	if *otsc.Compression != GzipCompression && *otsc.Compression != NoneCompression {
-		return errors.New("compression must be 'gzip' or 'none'")
-	}
-
-	return c.ValidateCommonSinkConfig(otsc.CommonSinkConfig)
-}
-
 func normalizeDir(dir **string) error {
 	if *dir == nil {
 		return nil
@@ -563,10 +506,6 @@ func propagateFluentDefaults(target *FluentDefaults, source FluentDefaults) {
 }
 
 func propagateHTTPDefaults(target *HTTPDefaults, source HTTPDefaults) {
-	propagateDefaults(target, source)
-}
-
-func propagateOtlpDefaults(target *OtlpDefaults, source OtlpDefaults) {
 	propagateDefaults(target, source)
 }
 

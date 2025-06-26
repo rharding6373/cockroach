@@ -119,7 +119,7 @@ func NewOutbox(
 func (o *Outbox) close(ctx context.Context) {
 	o.scratch.buf = nil
 	o.scratch.msg = nil
-	o.converter.Close(ctx)
+	o.converter.Release(ctx)
 	// Unset the input (which is a deselector operator) so that its output batch
 	// could be garbage collected. This allows us to release all memory
 	// registered with the allocator (the allocator is shared by the outbox and
@@ -177,15 +177,19 @@ func (o *Outbox) Run(
 	ctx = logtags.AddTag(ctx, "streamID", streamID)
 	log.VEventf(ctx, 2, "Outbox Dialing %s", sqlInstanceID)
 
-	var stream execinfrapb.RPCDistSQL_FlowStreamClient
+	var stream execinfrapb.DistSQL_FlowStreamClient
 	if err := func() error {
 		conn, err := execinfra.GetConnForOutbox(ctx, dialer, sqlInstanceID, connectionTimeout)
 		if err != nil {
-			log.VWarningf(ctx, 1, "Outbox Dial connection error, distributed query will fail: %+v", err)
+			log.Warningf(
+				ctx,
+				"Outbox Dial connection error, distributed query will fail: %+v",
+				err,
+			)
 			return err
 		}
 
-		client := execinfrapb.NewGRPCDistSQLClientAdapter(conn)
+		client := execinfrapb.NewDistSQLClient(conn)
 		// We use the flow context for the RPC so that when outbox context is
 		// canceled in case of a graceful shutdown, the gRPC stream keeps on
 		// running. If, however, the flow context is canceled, then the
@@ -193,7 +197,11 @@ func (o *Outbox) Run(
 		// gRPC stream being ungracefully shutdown too.
 		stream, err = client.FlowStream(flowCtx)
 		if err != nil {
-			log.VWarningf(ctx, 1, "Outbox FlowStream connection error, distributed query will fail: %+v", err)
+			log.Warningf(
+				ctx,
+				"Outbox FlowStream connection error, distributed query will fail: %+v",
+				err,
+			)
 			return err
 		}
 
@@ -201,10 +209,14 @@ func (o *Outbox) Run(
 		// the first message with data, consider doing that here too.
 		log.VEvent(ctx, 2, "Outbox sending header")
 		// Send header message to establish the remote server (consumer).
-		if err = stream.Send(
+		if err := stream.Send(
 			&execinfrapb.ProducerMessage{Header: &execinfrapb.ProducerHeader{FlowID: o.flowCtx.ID, StreamID: streamID}},
 		); err != nil {
-			log.VWarningf(ctx, 1, "Outbox Send header error, distributed query will fail: %+v", err)
+			log.Warningf(
+				ctx,
+				"Outbox Send header error, distributed query will fail: %+v",
+				err,
+			)
 			return err
 		}
 		return nil

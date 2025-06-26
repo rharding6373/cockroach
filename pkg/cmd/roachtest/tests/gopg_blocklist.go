@@ -28,6 +28,7 @@ var gopgBlockList = blocklist{
 	"v10.ExampleDB_Model_postgresArrayStructTag":                      "32552",
 	"v10.TestConversion":                                              "32552",
 	"v10.TestGinkgo":                                                  "41522",
+	"v10.TestGocheck":                                                 "17511",
 	"v10.TestReadColumnValue":                                         "26925",
 	"v10.TestUnixSocket":                                              "31113",
 }
@@ -50,8 +51,4 @@ var gopgIgnoreList = blocklist{
 	"pg | DB race | SelectOrInsert with OnConflict is race free":    "unknown",
 	"pg | DB race | SelectOrInsert without OnConflict is race free": "unknown",
 	`pg | ORM | relation with no results does not panic`:            "unknown",
-	// This test flakes sometimes because of connection reuse.
-	`v10.TestColumnReuse`: "unknown",
-	// This test is flaky sometimes due to the use of temp tables.
-	`pg | soft delete with int column nil model ForceDelete | deletes the model`: "unknown",
 }

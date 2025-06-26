@@ -18,7 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
-	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilitiespb"
+	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -176,7 +176,7 @@ func TestServerQuery(t *testing.T) {
 	}
 
 	conn := s.RPCClientConn(t, username.RootUserName())
-	client := conn.NewTimeSeriesClient()
+	client := tspb.NewTimeSeriesClient(conn)
 	response, err := client.Query(context.Background(), &tspb.TimeSeriesQueryRequest{
 		StartNanos: 500 * 1e9,
 		EndNanos:   526 * 1e9,
@@ -272,7 +272,7 @@ func TestServerQueryStarvation(t *testing.T) {
 	}
 
 	conn := s.RPCClientConn(t, username.RootUserName())
-	client := conn.NewTimeSeriesClient()
+	client := tspb.NewTimeSeriesClient(conn)
 
 	queries := make([]tspb.Query, 0, seriesCount)
 	for i := 0; i < seriesCount; i++ {
@@ -307,16 +307,11 @@ func TestServerQueryTenant(t *testing.T) {
 
 	systemDB := s.SystemLayer().SQLConn(t)
 
-	// This metric exists in the tenant registry since it's SQL-specific.
-	tenantMetricName := "sql.insert.count"
-	// This metric exists only in the host/system registry since it's process-level.
-	hostMetricName := "sys.rss"
-
 	// Populate data directly.
 	tsdb := s.TsDB().(*ts.DB)
 	if err := tsdb.StoreData(context.Background(), ts.Resolution10s, []tspb.TimeSeriesData{
 		{
-			Name:   tenantMetricName,
+			Name:   "test.metric",
 			Source: "1",
 			Datapoints: []tspb.TimeSeriesDatapoint{
 				{
@@ -330,7 +325,7 @@ func TestServerQueryTenant(t *testing.T) {
 			},
 		},
 		{
-			Name:   tenantMetricName,
+			Name:   "test.metric",
 			Source: "1-2",
 			Datapoints: []tspb.TimeSeriesDatapoint{
 				{
@@ -344,7 +339,7 @@ func TestServerQueryTenant(t *testing.T) {
 			},
 		},
 		{
-			Name:   tenantMetricName,
+			Name:   "test.metric",
 			Source: "10",
 			Datapoints: []tspb.TimeSeriesDatapoint{
 				{
@@ -358,7 +353,7 @@ func TestServerQueryTenant(t *testing.T) {
 			},
 		},
 		{
-			Name:   tenantMetricName,
+			Name:   "test.metric",
 			Source: "10-2",
 			Datapoints: []tspb.TimeSeriesDatapoint{
 				{
@@ -371,34 +366,6 @@ func TestServerQueryTenant(t *testing.T) {
 				},
 			},
 		},
-		{
-			Name:   hostMetricName,
-			Source: "1",
-			Datapoints: []tspb.TimeSeriesDatapoint{
-				{
-					TimestampNanos: 400 * 1e9,
-					Value:          13.0,
-				},
-				{
-					TimestampNanos: 500 * 1e9,
-					Value:          27.0,
-				},
-			},
-		},
-		{
-			Name:   hostMetricName,
-			Source: "10",
-			Datapoints: []tspb.TimeSeriesDatapoint{
-				{
-					TimestampNanos: 400 * 1e9,
-					Value:          31.0,
-				},
-				{
-					TimestampNanos: 500 * 1e9,
-					Value:          57.0,
-				},
-			},
-		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +375,7 @@ func TestServerQueryTenant(t *testing.T) {
 		Results: []tspb.TimeSeriesQueryResponse_Result{
 			{
 				Query: tspb.Query{
-					Name:    tenantMetricName,
+					Name:    "test.metric",
 					Sources: []string{"1"},
 				},
 				Datapoints: []tspb.TimeSeriesDatapoint{
@@ -424,7 +391,7 @@ func TestServerQueryTenant(t *testing.T) {
 			},
 			{
 				Query: tspb.Query{
-					Name:    tenantMetricName,
+					Name:    "test.metric",
 					Sources: []string{"1", "10"},
 				},
 				Datapoints: []tspb.TimeSeriesDatapoint{
@@ -442,18 +409,18 @@ func TestServerQueryTenant(t *testing.T) {
 	}
 
 	conn := s.RPCClientConn(t, username.RootUserName())
-	client := conn.NewTimeSeriesClient()
+	client := tspb.NewTimeSeriesClient(conn)
 	aggregatedResponse, err := client.Query(context.Background(), &tspb.TimeSeriesQueryRequest{
 		StartNanos: 400 * 1e9,
 		EndNanos:   500 * 1e9,
 		Queries: []tspb.Query{
 			{
-				Name:    tenantMetricName,
+				Name:    "test.metric",
 				Sources: []string{"1"},
 			},
 			{
 				// Not providing a source (nodeID or storeID) will aggregate across all sources.
-				Name: tenantMetricName,
+				Name: "test.metric",
 			},
 		},
 	})
@@ -471,7 +438,7 @@ func TestServerQueryTenant(t *testing.T) {
 		Results: []tspb.TimeSeriesQueryResponse_Result{
 			{
 				Query: tspb.Query{
-					Name:     tenantMetricName,
+					Name:     "test.metric",
 					Sources:  []string{"1"},
 					TenantID: systemID,
 				},
@@ -488,7 +455,7 @@ func TestServerQueryTenant(t *testing.T) {
 			},
 			{
 				Query: tspb.Query{
-					Name:     tenantMetricName,
+					Name:     "test.metric",
 					Sources:  []string{"1", "10"},
 					TenantID: systemID,
 				},
@@ -511,12 +478,12 @@ func TestServerQueryTenant(t *testing.T) {
 		EndNanos:   500 * 1e9,
 		Queries: []tspb.Query{
 			{
-				Name:     tenantMetricName,
+				Name:     "test.metric",
 				Sources:  []string{"1"},
 				TenantID: systemID,
 			},
 			{
-				Name:     tenantMetricName,
+				Name:     "test.metric",
 				TenantID: systemID,
 			},
 		},
@@ -535,7 +502,7 @@ func TestServerQueryTenant(t *testing.T) {
 		Results: []tspb.TimeSeriesQueryResponse_Result{
 			{
 				Query: tspb.Query{
-					Name:     tenantMetricName,
+					Name:     "test.metric",
 					Sources:  []string{"1"},
 					TenantID: tenantID,
 				},
@@ -552,7 +519,7 @@ func TestServerQueryTenant(t *testing.T) {
 			},
 			{
 				Query: tspb.Query{
-					Name:     tenantMetricName,
+					Name:     "test.metric",
 					Sources:  []string{"1", "10"},
 					TenantID: tenantID,
 				},
@@ -575,22 +542,22 @@ func TestServerQueryTenant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	capability := map[tenantcapabilitiespb.ID]string{tenantcapabilitiespb.CanViewTSDBMetrics: "true"}
+	capability := map[tenantcapabilities.ID]string{tenantcapabilities.CanViewTSDBMetrics: "true"}
 	serverutils.WaitForTenantCapabilities(t, s, tenantID, capability, "")
 	tenantConn := tenant.RPCClientConn(t, username.RootUserName())
-	tenantClient := tenantConn.NewTimeSeriesClient()
+	tenantClient := tspb.NewTimeSeriesClient(tenantConn)
 
 	tenantResponse, err := tenantClient.Query(context.Background(), &tspb.TimeSeriesQueryRequest{
 		StartNanos: 400 * 1e9,
 		EndNanos:   500 * 1e9,
 		Queries: []tspb.Query{
 			{
-				Name:    tenantMetricName,
+				Name:    "test.metric",
 				Sources: []string{"1"},
 			},
 			{
 				// Not providing a source (nodeID or storeID) will aggregate across all sources.
-				Name: tenantMetricName,
+				Name: "test.metric",
 			},
 		},
 	})
@@ -601,62 +568,6 @@ func TestServerQueryTenant(t *testing.T) {
 		sort.Strings(r.Sources)
 	}
 	require.Equal(t, expectedTenantResponse, tenantResponse)
-
-	// Test that host metrics are inaccessible to tenant without capability.
-	hostMetricsRequest := &tspb.TimeSeriesQueryRequest{
-		StartNanos: 400 * 1e9,
-		EndNanos:   500 * 1e9,
-		Queries: []tspb.Query{
-			{
-				Name:    hostMetricName,
-				Sources: []string{"1"},
-			},
-		},
-	}
-
-	_, err = tenantClient.Query(context.Background(), hostMetricsRequest)
-	require.Error(t, err)
-
-	// Test that after enabling all metrics capability, host metrics are returned.
-	expectedTenantHostMetricsResponse := &tspb.TimeSeriesQueryResponse{
-		Results: []tspb.TimeSeriesQueryResponse_Result{
-			{
-				Query: tspb.Query{
-					Name:    hostMetricName,
-					Sources: []string{"1"},
-				},
-				Datapoints: []tspb.TimeSeriesDatapoint{
-					{
-						TimestampNanos: 400 * 1e9,
-						Value:          13.0,
-					},
-					{
-						TimestampNanos: 500 * 1e9,
-						Value:          27.0,
-					},
-				},
-			},
-		},
-	}
-	_, err = systemDB.Exec("ALTER TENANT [2] GRANT CAPABILITY can_view_all_metrics=true;\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	capability = map[tenantcapabilitiespb.ID]string{tenantcapabilitiespb.CanViewAllMetrics: "true"}
-	serverutils.WaitForTenantCapabilities(t, s, tenantID, capability, "")
-
-	tenantResponse, err = tenantClient.Query(context.Background(), &tspb.TimeSeriesQueryRequest{
-		StartNanos: 400 * 1e9,
-		EndNanos:   500 * 1e9,
-		Queries: []tspb.Query{
-			{
-				Name:    hostMetricName,
-				Sources: []string{"1"},
-			},
-		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, expectedTenantHostMetricsResponse, tenantResponse)
 }
 
 // TestServerQueryMemoryManagement verifies that queries succeed under
@@ -696,7 +607,7 @@ func TestServerQueryMemoryManagement(t *testing.T) {
 	}
 
 	conn := s.RPCClientConn(t, username.RootUserName())
-	client := conn.NewTimeSeriesClient()
+	client := tspb.NewTimeSeriesClient(conn)
 
 	queries := make([]tspb.Query, 0, seriesCount)
 	for i := 0; i < seriesCount; i++ {
@@ -773,7 +684,7 @@ func TestServerDump(t *testing.T) {
 	}
 
 	conn := s.RPCClientConn(t, username.RootUserName())
-	client := conn.NewTimeSeriesClient()
+	client := tspb.NewTimeSeriesClient(conn)
 
 	dumpClient, err := client.Dump(ctx, &tspb.DumpRequest{
 		Names:      names,
@@ -784,7 +695,7 @@ func TestServerDump(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	readDataFromDump := func(t *testing.T, dumpClient tspb.RPCTimeSeries_DumpClient) (totalMsgCount int, _ map[string]map[string]tspb.TimeSeriesData) {
+	readDataFromDump := func(t *testing.T, dumpClient tspb.TimeSeries_DumpClient) (totalMsgCount int, _ map[string]map[string]tspb.TimeSeriesData) {
 		t.Helper()
 		// Read data from dump command.
 		resultMap := make(map[string]map[string]tspb.TimeSeriesData)
@@ -869,7 +780,7 @@ func TestServerDump(t *testing.T) {
 		require.NoError(t, s.DB().Run(ctx, &b))
 
 		conn := s.RPCClientConn(t, username.RootUserName())
-		client := conn.NewTimeSeriesClient()
+		client := tspb.NewTimeSeriesClient(conn)
 
 		dumpClient, err := client.Dump(ctx, &tspb.DumpRequest{
 			Names:      names,
@@ -899,7 +810,7 @@ func BenchmarkServerQuery(b *testing.B) {
 	}
 
 	conn := s.RPCClientConn(b, username.RootUserName())
-	client := conn.NewTimeSeriesClient()
+	client := tspb.NewTimeSeriesClient(conn)
 
 	queries := make([]tspb.Query, 0, seriesCount)
 	for i := 0; i < seriesCount; i++ {

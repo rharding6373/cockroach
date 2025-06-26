@@ -34,8 +34,9 @@ type tableReader struct {
 	execinfra.ProcessorBase
 	execinfra.SpansWithCopy
 
-	limitHint   rowinfra.RowLimit
-	parallelize bool
+	limitHint       rowinfra.RowLimit
+	parallelize     bool
+	batchBytesLimit rowinfra.BytesLimit
 
 	scanStarted bool
 
@@ -79,19 +80,27 @@ func newTableReader(
 ) (*tableReader, error) {
 	// NB: we hit this with a zero NodeID (but !ok) with multi-tenancy.
 	if nodeID, ok := flowCtx.NodeID.OptionalNodeID(); ok && nodeID == 0 {
-		return nil, errors.AssertionFailedf("attempting to create a tableReader with uninitialized NodeID")
+		return nil, errors.Errorf("attempting to create a tableReader with uninitialized NodeID")
 	}
 
-	if spec.LimitHint > 0 {
+	if spec.LimitHint > 0 || spec.BatchBytesLimit > 0 {
 		// Parallelize shouldn't be set when there's a limit hint, but double-check
 		// just in case.
 		spec.Parallelize = false
+	}
+	var batchBytesLimit rowinfra.BytesLimit
+	if !spec.Parallelize {
+		batchBytesLimit = rowinfra.BytesLimit(spec.BatchBytesLimit)
+		if batchBytesLimit == 0 {
+			batchBytesLimit = rowinfra.GetDefaultBatchBytesLimit(flowCtx.EvalCtx.TestingKnobs.ForceProductionValues)
+		}
 	}
 
 	tr := trPool.Get().(*tableReader)
 
 	tr.limitHint = rowinfra.RowLimit(execinfra.LimitHint(spec.LimitHint, post))
 	tr.parallelize = spec.Parallelize
+	tr.batchBytesLimit = batchBytesLimit
 	tr.maxTimestampAge = time.Duration(spec.MaxTimestampAgeNanos)
 
 	// Make sure the key column types are hydrated. The fetched column types
@@ -141,7 +150,6 @@ func newTableReader(
 			LockWaitPolicy:             spec.LockingWaitPolicy,
 			LockDurability:             spec.LockingDurability,
 			LockTimeout:                flowCtx.EvalCtx.SessionData().LockTimeout,
-			DeadlockTimeout:            flowCtx.EvalCtx.SessionData().DeadlockTimeout,
 			Alloc:                      &tr.alloc,
 			MemMonitor:                 flowCtx.Mon,
 			Spec:                       &spec.FetchSpec,
@@ -160,9 +168,6 @@ func newTableReader(
 	}
 
 	if execstats.ShouldCollectStats(ctx, flowCtx.CollectStats) {
-		if flowTxn := flowCtx.EvalCtx.Txn; flowTxn != nil {
-			tr.contentionEventsListener.Init(flowTxn.ID())
-		}
 		tr.fetcher = newRowFetcherStatCollector(&fetcher)
 		tr.ExecStatsForTrace = tr.execStatsForTrace
 	} else {
@@ -196,17 +201,14 @@ func (tr *tableReader) Start(ctx context.Context) {
 }
 
 func (tr *tableReader) startScan(ctx context.Context) error {
-	if cb := tr.FlowCtx.Cfg.TestingKnobs.TableReaderStartScanCb; cb != nil {
-		cb()
+	limitBatches := !tr.parallelize
+	var bytesLimit rowinfra.BytesLimit
+	if !limitBatches {
+		bytesLimit = rowinfra.NoBytesLimit
+	} else {
+		bytesLimit = tr.batchBytesLimit
 	}
-	bytesLimit := rowinfra.NoBytesLimit
-	if !tr.parallelize {
-		bytesLimit = rowinfra.BytesLimit(tr.FlowCtx.Cfg.TestingKnobs.TableReaderBatchBytesLimit)
-		if bytesLimit == 0 {
-			bytesLimit = rowinfra.GetDefaultBatchBytesLimit(tr.FlowCtx.EvalCtx.TestingKnobs.ForceProductionValues)
-		}
-	}
-	log.VEventf(ctx, 1, "starting scan with parallelize=%t", tr.parallelize)
+	log.VEventf(ctx, 1, "starting scan with limitBatches %t", limitBatches)
 	var err error
 	if tr.maxTimestampAge == 0 {
 		err = tr.fetcher.StartScan(
@@ -216,7 +218,7 @@ func (tr *tableReader) startScan(ctx context.Context) error {
 		initialTS := tr.FlowCtx.Txn.ReadTimestamp()
 		err = tr.fetcher.StartInconsistentScan(
 			ctx, tr.FlowCtx.Cfg.DB.KV(), initialTS, tr.maxTimestampAge, tr.Spans,
-			bytesLimit, tr.limitHint, tr.FlowCtx.EvalCtx.QualityOfService(),
+			bytesLimit, tr.limitHint, tr.EvalCtx.QualityOfService(),
 		)
 	}
 	tr.scanStarted = true
@@ -310,17 +312,14 @@ func (tr *tableReader) execStatsForTrace() *execinfrapb.ComponentStats {
 			KVPairsRead:         optional.MakeUint(uint64(tr.fetcher.GetKVPairsRead())),
 			TuplesRead:          is.NumTuples,
 			KVTime:              is.WaitTime,
-			ContentionTime:      optional.MakeTimeValue(tr.contentionEventsListener.GetContentionTime()),
-			LockWaitTime:        optional.MakeTimeValue(tr.contentionEventsListener.GetLockWaitTime()),
-			LatchWaitTime:       optional.MakeTimeValue(tr.contentionEventsListener.GetLatchWaitTime()),
+			ContentionTime:      optional.MakeTimeValue(tr.contentionEventsListener.CumulativeContentionTime),
 			BatchRequestsIssued: optional.MakeUint(uint64(tr.fetcher.GetBatchRequestsIssued())),
 			KVCPUTime:           optional.MakeTimeValue(is.kvCPUTime),
 		},
 		Output: tr.OutputHelper.Stats(),
 	}
-	ret.Exec.ConsumedRU = optional.MakeUint(tr.tenantConsumptionListener.GetConsumedRU())
-	scanStats := tr.scanStatsListener.GetScanStats()
-	execstats.PopulateKVMVCCStats(&ret.KV, &scanStats)
+	ret.Exec.ConsumedRU = optional.MakeUint(tr.tenantConsumptionListener.ConsumedRU)
+	execstats.PopulateKVMVCCStats(&ret.KV, &tr.scanStatsListener.ScanStats)
 	return ret
 }
 

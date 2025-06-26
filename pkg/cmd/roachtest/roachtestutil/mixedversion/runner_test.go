@@ -14,7 +14,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/clusterupgrade"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/task"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/logger"
 	"github.com/cockroachdb/errors"
@@ -145,10 +144,6 @@ func Test_run(t *testing.T) {
 	}
 }
 
-func testAddAnnotation() error {
-	return nil
-}
-
 func testTestRunner() *testRunner {
 	runnerCtx, cancel := context.WithCancel(ctx)
 	var ranUserHooks atomic.Bool
@@ -157,14 +152,13 @@ func testTestRunner() *testRunner {
 		Nodes: nodes,
 	}
 	return &testRunner{
-		ctx:            runnerCtx,
-		cancel:         cancel,
-		logger:         nilLogger,
-		systemService:  newServiceRuntime(systemDescriptor),
-		background:     task.NewManager(runnerCtx, nilLogger),
-		ranUserHooks:   &ranUserHooks,
-		plan:           &TestPlan{seed: seed},
-		_addAnnotation: testAddAnnotation,
+		ctx:           runnerCtx,
+		cancel:        cancel,
+		logger:        nilLogger,
+		systemService: newServiceRuntime(systemDescriptor),
+		background:    newBackgroundRunner(runnerCtx, nilLogger),
+		ranUserHooks:  &ranUserHooks,
+		plan:          &TestPlan{seed: seed},
 	}
 }
 
@@ -177,9 +171,6 @@ func (*testSingleStep) Background() shouldStop { return nil }
 
 func (tss *testSingleStep) Run(_ context.Context, _ *logger.Logger, _ *rand.Rand, _ *Helper) error {
 	return tss.runFunc()
-}
-func (s testSingleStep) ConcurrencyDisabled() bool {
-	return false
 }
 
 func newTestStep(f func() error) *singleStep {

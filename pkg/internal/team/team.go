@@ -8,10 +8,12 @@
 package team
 
 import (
-	_ "embed"
 	"io"
-	"strings"
+	"os"
+	"path/filepath"
 
+	"github.com/cockroachdb/cockroach/pkg/build/bazel"
+	"github.com/cockroachdb/cockroach/pkg/internal/reporoot"
 	"github.com/cockroachdb/errors"
 	"gopkg.in/yaml.v2"
 )
@@ -31,23 +33,24 @@ type Team struct {
 	// does not contain TeamName.
 	Aliases map[Alias]Purpose `yaml:"aliases"`
 	// GitHub label will be added to issues posted for this team.
-	// Multiple labels can be specified, separated by commas.
 	Label string `yaml:"label"`
-	// SilenceMentions is true if @-mentions should be suppressed for this team.
+	// TriageColumnID is the GitHub Column ID to assign issues to.
+	TriageColumnID int `yaml:"triage_column_id"`
+	// SilenceMentions is true if @-mentions should be supressed for this team.
 	SilenceMentions bool `yaml:"silence_mentions"`
+	// Email is the email address for this team.
+	//
+	// Currently unused.
+	Email string `yaml:"email"`
+	// Slack is the slack channel for this team.
+	//
+	// Currently unused.
+	Slack string `yaml:"slack"`
 }
 
 // Name returns the main Alias of the team.
 func (t Team) Name() Alias {
 	return t.TeamName
-}
-
-// Labels returns the list of labels (possibly empty).
-func (t Team) Labels() []string {
-	if t.Label == "" {
-		return nil
-	}
-	return strings.Split(t.Label, ",")
 }
 
 // Map contains the in-memory representation of TEAMS.yaml.
@@ -77,14 +80,28 @@ func (m Map) GetAliasesForPurpose(alias Alias, purpose Purpose) ([]Alias, bool) 
 	return sl, true
 }
 
-//go:generate cp ../../../TEAMS.yaml TEAMS.yaml
-
-//go:embed TEAMS.yaml
-var teamsYaml string
-
 // DefaultLoadTeams loads teams from the repo root's TEAMS.yaml.
 func DefaultLoadTeams() (Map, error) {
-	return LoadTeams(strings.NewReader(teamsYaml))
+	var path string
+	if os.Getenv("BAZEL_TEST") != "" {
+		runfiles, err := bazel.RunfilesPath()
+		if err != nil {
+			return nil, err
+		}
+		path = filepath.Join(runfiles, "TEAMS.yaml")
+	} else {
+		root := reporoot.GetFor(".", "TEAMS.yaml")
+		if root == "" {
+			return nil, errors.New("TEAMS.yaml not found")
+		}
+		path = filepath.Join(root, "TEAMS.yaml")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return LoadTeams(f)
 }
 
 // Purpose determines which alias to return for a given team via
@@ -96,13 +113,11 @@ const (
 	// PurposeRoachtest indicates that the team handles that should be mentioned
 	// in roachtest issues should be returned.
 	PurposeRoachtest = Purpose("roachtest")
-	PurposeUnittest  = Purpose("unittest")
 )
 
 var validPurposes = map[Purpose]struct{}{
 	PurposeOther:     {},
 	PurposeRoachtest: {}, // mention in roachtest issues
-	PurposeUnittest:  {}, // mention in unit test issues
 }
 
 // LoadTeams loads the teams from an io input.

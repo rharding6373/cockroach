@@ -58,14 +58,8 @@ type BufferingAdder struct {
 	// name of the BufferingAdder for the purpose of logging only.
 	name string
 
-	// importEpoch specifies the ImportEpoch of the table the BufferingAdder
-	// is ingesting data as part of an IMPORT INTO job. If specified, the Bulk
-	// Adder's SSTBatcher will write the import epoch to each versioned value's
-	// metadata.
-	importEpoch uint32
-
 	bulkMon *mon.BytesMonitor
-	memAcc  mon.EarmarkedBoundAccount
+	memAcc  mon.BoundAccount
 
 	onFlush func(summary kvpb.BulkOpSummary)
 	// underfill tracks how much capacity was remaining in curBuf when it was
@@ -79,9 +73,6 @@ var _ kvserverbase.BulkAdder = &BufferingAdder{}
 // passed to add into SSTs that are then ingested. rangeCache if set is
 // consulted to avoid generating an SST that will span a range boundary and thus
 // encounter an error and need to be split and retired to be applied.
-//
-// The BulkAdder takes ownership of the memory monitor which must be non-nil. In
-// case of an error, the monitor will be stopped.
 func MakeBulkAdder(
 	ctx context.Context,
 	db *kv.DB,
@@ -91,15 +82,7 @@ func MakeBulkAdder(
 	opts kvserverbase.BulkAdderOptions,
 	bulkMon *mon.BytesMonitor,
 	sendLimiter limit.ConcurrentRequestLimiter,
-) (_ *BufferingAdder, retErr error) {
-	if bulkMon == nil {
-		return nil, errors.New("bulkMon must be non-nil")
-	}
-	defer func() {
-		if retErr != nil {
-			bulkMon.Stop(ctx)
-		}
-	}()
+) (*BufferingAdder, error) {
 	if opts.MinBufferSize == 0 {
 		opts.MinBufferSize = 32 << 20
 	}
@@ -108,34 +91,19 @@ func MakeBulkAdder(
 	}
 
 	b := &BufferingAdder{
-		name:        opts.Name,
-		importEpoch: opts.ImportEpoch,
+		name: opts.Name,
 		sink: SSTBatcher{
-			name: opts.Name,
-			db:   db,
-			rc:   rangeCache,
-			adder: newSSTAdder(
-				db,
-				settings,
-				opts.WriteAtBatchTimestamp,
-				opts.DisallowShadowingBelow,
-				admissionpb.BulkNormalPri,
-			),
+			name:                   opts.Name,
+			db:                     db,
+			rc:                     rangeCache,
 			settings:               settings,
 			skipDuplicates:         opts.SkipDuplicates,
 			disallowShadowingBelow: opts.DisallowShadowingBelow,
-			batch: batch{
-				// TODO(jeffswenson): As far as I can tell, setting the batch timestamp here does nothing. The API
-				// is actively misleading.
-				//
-				// It used to do something before #75275 was merged, but now it is always test to hlc.Timestamp{}
-				// by reset before the first flush. I think we should clean this up, but cleaning it up properly
-				// requires cleanups throughout the schema changer code base to replace "WriteAsOf" with "ReadAsOf".
-				ts: opts.BatchTimestamp,
-			},
-			writeAtBatchTS: opts.WriteAtBatchTimestamp,
-			mem:            bulkMon.MakeConcurrentBoundAccount(),
-			limiter:        sendLimiter,
+			batchTS:                opts.BatchTimestamp,
+			writeAtBatchTS:         opts.WriteAtBatchTimestamp,
+			mem:                    bulkMon.MakeConcurrentBoundAccount(),
+			limiter:                sendLimiter,
+			priority:               admissionpb.BulkNormalPri,
 		},
 		timestamp:      timestamp,
 		maxBufferLimit: opts.MaxBufferSize,
@@ -145,7 +113,6 @@ func MakeBulkAdder(
 		lastFlush:      timeutil.Now(),
 		curBufSummary:  kvpb.BulkOpSummary{},
 	}
-	b.sink.init(ctx)
 
 	// Register a callback with the underlying sink to accumulate the summary for
 	// the current buffered KVs. The curBufSummary is reset when the buffering
@@ -160,7 +127,7 @@ func MakeBulkAdder(
 	//
 	// TODO(adityamaru): IMPORT should also reserve memory for a single SST which
 	// it will store in-memory before sending it to RocksDB.
-	b.memAcc = bulkMon.MakeEarmarkedBoundAccount()
+	b.memAcc = bulkMon.MakeBoundAccount()
 	if opts.MinBufferSize > 0 {
 		if err := b.memAcc.Reserve(ctx, opts.MinBufferSize); err != nil {
 			return nil, errors.WithHint(
@@ -192,8 +159,11 @@ func (b *BufferingAdder) Close(ctx context.Context) {
 		b.sink.mu.Unlock()
 	}
 	b.sink.Close(ctx)
-	b.memAcc.Close(ctx)
-	b.bulkMon.Stop(ctx)
+
+	if b.bulkMon != nil {
+		b.memAcc.Close(ctx)
+		b.bulkMon.Stop(ctx)
+	}
 }
 
 // Add adds a key to the buffer and checks if it needs to flush.
@@ -210,7 +180,7 @@ func (b *BufferingAdder) Add(ctx context.Context, key roachpb.Key, value []byte)
 		return b.curBuf.append(key, value)
 	}
 
-	b.sink.batch.stats.FlushesDueToSize++
+	b.sink.currentStats.FlushesDueToSize++
 	log.VEventf(ctx, 3, "%s adder triggering flush of %s of KVs in %s buffer",
 		b.name, b.curBuf.KVSize(), b.bufferedMemSize())
 
@@ -273,7 +243,7 @@ func (b *BufferingAdder) Flush(ctx context.Context) error {
 }
 
 func (b *BufferingAdder) doFlush(ctx context.Context, forSize bool) error {
-	b.sink.batch.stats.FillWait += timeutil.Since(b.lastFlush)
+	b.sink.currentStats.FillWait += timeutil.Since(b.lastFlush)
 
 	if b.bufferedKeys() == 0 {
 		if b.onFlush != nil {
@@ -283,10 +253,8 @@ func (b *BufferingAdder) doFlush(ctx context.Context, forSize bool) error {
 		b.curBufSummary.Reset()
 		return nil
 	}
-	if err := b.sink.Reset(ctx); err != nil {
-		return errors.Wrapf(err, "failed to reset %s adder before flush", b.name)
-	}
-	b.sink.batch.stats.BufferFlushes++
+	b.sink.Reset(ctx)
+	b.sink.currentStats.BufferFlushes++
 
 	var before *bulkpb.IngestionPerformanceStats
 	var beforeSize int64
@@ -295,7 +263,7 @@ func (b *BufferingAdder) doFlush(ctx context.Context, forSize bool) error {
 		b.sink.mu.Lock()
 		before = b.sink.mu.totalStats.Identity().(*bulkpb.IngestionPerformanceStats)
 		before.Combine(&b.sink.mu.totalStats)
-		before.Combine(&b.sink.batch.stats)
+		before.Combine(&b.sink.currentStats)
 		beforeSize = b.sink.mu.totalBulkOpSummary.DataSize
 		b.sink.mu.Unlock()
 	}
@@ -308,7 +276,7 @@ func (b *BufferingAdder) doFlush(ctx context.Context, forSize bool) error {
 	mvccKey := storage.MVCCKey{Timestamp: b.timestamp}
 
 	beforeFlush := timeutil.Now()
-	b.sink.batch.stats.SortWait += beforeFlush.Sub(beforeSort)
+	b.sink.currentStats.SortWait += beforeFlush.Sub(beforeSort)
 
 	// If this is the first flush and is due to size, if it was unsorted then
 	// create initial splits if requested before flushing.
@@ -330,15 +298,8 @@ func (b *BufferingAdder) doFlush(ctx context.Context, forSize bool) error {
 
 	for i := range b.curBuf.entries {
 		mvccKey.Key = b.curBuf.Key(i)
-		if b.importEpoch != 0 {
-			if err := b.sink.AddMVCCKeyWithImportEpoch(ctx, mvccKey, b.curBuf.Value(i),
-				b.importEpoch); err != nil {
-				return err
-			}
-		} else {
-			if err := b.sink.AddMVCCKey(ctx, mvccKey, b.curBuf.Value(i)); err != nil {
-				return err
-			}
+		if err := b.sink.AddMVCCKey(ctx, mvccKey, b.curBuf.Value(i)); err != nil {
+			return err
 		}
 	}
 	if err := b.sink.Flush(ctx); err != nil {
@@ -351,14 +312,14 @@ func (b *BufferingAdder) doFlush(ctx context.Context, forSize bool) error {
 		}
 	}
 
-	b.sink.batch.stats.FlushWait += timeutil.Since(beforeFlush)
+	b.sink.currentStats.FlushWait += timeutil.Since(beforeFlush)
 
 	if log.V(3) && before != nil {
 		b.sink.mu.Lock()
 		written := b.sink.mu.totalBulkOpSummary.DataSize - beforeSize
 		afterStats := b.sink.mu.totalStats.Identity().(*bulkpb.IngestionPerformanceStats)
 		afterStats.Combine(&b.sink.mu.totalStats)
-		afterStats.Combine(&b.sink.batch.stats)
+		afterStats.Combine(&b.sink.currentStats)
 		b.sink.mu.Unlock()
 
 		files := afterStats.Batches - before.Batches
@@ -468,8 +429,8 @@ func (b *BufferingAdder) createInitialSplits(ctx context.Context) error {
 	splitsWait := beforeScatters.Sub(beforeSplits)
 	log.Infof(ctx, "%s adder created %d initial splits in %v from %d keys in %s buffer",
 		b.name, len(toScatter), timing(splitsWait), b.curBuf.Len(), b.curBuf.MemSize())
-	b.sink.batch.stats.Splits += int64(len(toScatter))
-	b.sink.batch.stats.SplitWait += splitsWait
+	b.sink.currentStats.Splits += int64(len(toScatter))
+	b.sink.currentStats.SplitWait += splitsWait
 
 	for _, splitKey := range toScatter {
 		resp, err := b.sink.db.AdminScatter(ctx, splitKey, 0 /* maxSize */)
@@ -477,18 +438,19 @@ func (b *BufferingAdder) createInitialSplits(ctx context.Context) error {
 			log.Warningf(ctx, "failed to scatter: %v", err)
 			continue
 		}
-		b.sink.batch.stats.Scatters++
-		b.sink.batch.stats.ScatterMoved += resp.ReplicasScatteredBytes
+		b.sink.currentStats.Scatters++
+		b.sink.currentStats.ScatterMoved += resp.ReplicasScatteredBytes
 		if resp.ReplicasScatteredBytes > 0 {
 			log.VEventf(ctx, 1, "pre-split scattered %s in non-empty range %s",
 				sz(resp.ReplicasScatteredBytes), resp.RangeInfos[0].Desc.KeySpan().AsRawSpanWithNoLocals())
 		}
 	}
 	scattersWait := timeutil.Since(beforeScatters)
-	b.sink.batch.stats.ScatterWait += scattersWait
+	b.sink.currentStats.ScatterWait += scattersWait
 	log.Infof(ctx, "%s adder scattered %d initial split spans in %v",
 		b.name, len(toScatter), timing(scattersWait))
 
+	b.sink.initialSplitDone = true
 	return nil
 }
 

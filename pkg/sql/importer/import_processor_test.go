@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"sort"
-	"sync/atomic"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -97,6 +96,8 @@ func TestConverterFlushesBatches(t *testing.T) {
 
 	tests := []testSpec{
 		newTestSpec(ctx, t, csvFormat(), "testdata/csv/data-0"),
+		newTestSpec(ctx, t, mysqlDumpFormat(), "testdata/mysqldump/simple.sql"),
+		newTestSpec(ctx, t, pgDumpFormat(), "testdata/pgdump/simple.sql"),
 		newTestSpec(ctx, t, avroFormat(t, roachpb.AvroOptions_OCF), "testdata/avro/simple.ocf"),
 	}
 
@@ -118,7 +119,7 @@ func TestConverterFlushesBatches(t *testing.T) {
 				}
 
 				kvCh := make(chan row.KVBatch, batchSize)
-				semaCtx := tree.MakeSemaContext(nil /* resolver */)
+				semaCtx := tree.MakeSemaContext()
 				conv, err := makeInputConverter(ctx, &semaCtx, converterSpec, &evalCtx, kvCh,
 					nil /* seqChunkProvider */, db)
 				if err != nil {
@@ -236,7 +237,7 @@ func TestImportIgnoresProcessedFiles(t *testing.T) {
 		Mon:     evalCtx.TestingMon,
 		Cfg: &execinfra.ServerConfig{
 			JobRegistry:     &jobs.Registry{},
-			Settings:        cluster.MakeTestingClusterSettings(),
+			Settings:        &cluster.Settings{},
 			ExternalStorage: externalStorageFactory,
 			DB:              fakeDB{},
 			BulkAdder: func(
@@ -268,6 +269,16 @@ func TestImportIgnoresProcessedFiles(t *testing.T) {
 		{
 			"csv-all-valid",
 			newTestSpec(ctx, t, csvFormat(), "testdata/csv/data-0"),
+			[]int64{0},
+		},
+		{
+			"mysql-one-invalid",
+			newTestSpec(ctx, t, mysqlDumpFormat(), "testdata/mysqldump/simple.sql", "/_/missing/_"),
+			[]int64{0, eofOffset},
+		},
+		{
+			"pgdump-one-input",
+			newTestSpec(ctx, t, pgDumpFormat(), "testdata/pgdump/simple.sql"),
 			[]int64{0},
 		},
 		{
@@ -351,7 +362,7 @@ func TestImportHonorsResumePosition(t *testing.T) {
 		Mon:     evalCtx.TestingMon,
 		Cfg: &execinfra.ServerConfig{
 			JobRegistry:     &jobs.Registry{},
-			Settings:        cluster.MakeTestingClusterSettings(),
+			Settings:        &cluster.Settings{},
 			ExternalStorage: externalStorageFactory,
 			DB:              fakeDB{},
 			BulkAdder: func(
@@ -375,8 +386,10 @@ func TestImportHonorsResumePosition(t *testing.T) {
 	// contain sufficient number of rows.
 	testSpecs := []testSpec{
 		newTestSpec(ctx, t, csvFormat(), "testdata/csv/data-0"),
+		newTestSpec(ctx, t, mysqlDumpFormat(), "testdata/mysqldump/simple.sql"),
 		newTestSpec(ctx, t, mysqlOutFormat(), "testdata/mysqlout/csv-ish/simple.txt"),
 		newTestSpec(ctx, t, pgCopyFormat(), "testdata/pgcopy/default/test.txt"),
+		newTestSpec(ctx, t, pgDumpFormat(), "testdata/pgdump/simple.sql"),
 		newTestSpec(ctx, t, avroFormat(t, roachpb.AvroOptions_JSON_RECORDS), "testdata/avro/simple-sorted.json"),
 	}
 
@@ -388,9 +401,6 @@ func TestImportHonorsResumePosition(t *testing.T) {
 		numKeys := 0
 
 		for _, resumePos := range resumes {
-			// t.Failed() acquires a read lock only, so in order to prevent the
-			// race in the progress consumer goroutine, we use our own atomic.
-			var failed atomic.Bool
 			spec.ResumePos = map[int32]int64{0: resumePos}
 			if resumePos == 0 {
 				// We use 0 resume position to record the set of keys in the input file.
@@ -415,7 +425,6 @@ func TestImportHonorsResumePosition(t *testing.T) {
 					keys.Lock()
 					idx := sort.Search(maxKeyIdx, func(i int) bool { return keys.keys[i].Compare(k) == 0 })
 					if idx < maxKeyIdx {
-						failed.Store(true)
 						t.Errorf("failed to skip key[%d]=%s", idx, k)
 					}
 					keys.Unlock()
@@ -433,7 +442,7 @@ func TestImportHonorsResumePosition(t *testing.T) {
 					// (BulkAdderFlushesEveryBatch), then the progress resport must be emitted every
 					// batchSize rows (possibly out of order), starting from our initial resumePos
 					for prog := range progCh {
-						if !failed.Load() && prog.ResumePos[0] < (rp+int64(batchSize)) {
+						if !t.Failed() && prog.ResumePos[0] < (rp+int64(batchSize)) {
 							t.Logf("unexpected progress resume pos: %d", prog.ResumePos[0])
 							t.Fail()
 						}
@@ -483,7 +492,7 @@ func TestImportHandlesDuplicateKVs(t *testing.T) {
 		Mon:     evalCtx.TestingMon,
 		Cfg: &execinfra.ServerConfig{
 			JobRegistry:     &jobs.Registry{},
-			Settings:        cluster.MakeTestingClusterSettings(),
+			Settings:        &cluster.Settings{},
 			ExternalStorage: externalStorageFactory,
 			DB:              fakeDB{},
 			BulkAdder: func(
@@ -501,8 +510,10 @@ func TestImportHandlesDuplicateKVs(t *testing.T) {
 	// All imports produce a DuplicateKeyError, which we expect to be propagated.
 	testSpecs := []testSpec{
 		newTestSpec(ctx, t, csvFormat(), "testdata/csv/data-0"),
+		newTestSpec(ctx, t, mysqlDumpFormat(), "testdata/mysqldump/simple.sql"),
 		newTestSpec(ctx, t, mysqlOutFormat(), "testdata/mysqlout/csv-ish/simple.txt"),
 		newTestSpec(ctx, t, pgCopyFormat(), "testdata/pgcopy/default/test.txt"),
+		newTestSpec(ctx, t, pgDumpFormat(), "testdata/pgdump/simple.sql"),
 		newTestSpec(ctx, t, avroFormat(t, roachpb.AvroOptions_JSON_RECORDS), "testdata/avro/simple-sorted.json"),
 	}
 
@@ -611,7 +622,7 @@ func setImportReaderParallelism(parallelism int32) func() {
 // Queries the status and the import progress of the job.
 type jobState struct {
 	err    error
-	status jobs.State
+	status jobs.Status
 	prog   jobspb.ImportProgress
 }
 
@@ -633,7 +644,7 @@ SELECT status, payload, progress FROM crdb_internal.system_jobs WHERE id = $1
 		return
 	}
 
-	if js.status == jobs.StateFailed {
+	if js.status == jobs.StatusFailed {
 		payload := &jobspb.Payload{}
 		js.err = protoutil.Unmarshal(payloadBytes, payload)
 		if js.err == nil {
@@ -758,7 +769,7 @@ func TestCSVImportCanBeResumed(t *testing.T) {
 	unblockImport()
 
 	// Get updated resume position counter.
-	js = queryJobUntil(t, sqlDB.DB, jobID, func(js jobState) bool { return jobs.StatePaused == js.status })
+	js = queryJobUntil(t, sqlDB.DB, jobID, func(js jobState) bool { return jobs.StatusPaused == js.status })
 	resumePos := js.prog.ResumePos[0]
 	t.Logf("Resume pos: %v\n", js.prog.ResumePos[0])
 
@@ -766,7 +777,7 @@ func TestCSVImportCanBeResumed(t *testing.T) {
 	if err := registry.Unpause(ctx, nil, jobID); err != nil {
 		t.Fatal(err)
 	}
-	js = queryJobUntil(t, sqlDB.DB, jobID, func(js jobState) bool { return jobs.StateSucceeded == js.status })
+	js = queryJobUntil(t, sqlDB.DB, jobID, func(js jobState) bool { return jobs.StatusSucceeded == js.status })
 
 	// Verify that the import proceeded from the resumeRow position.
 	assert.Equal(t, importSummary.Rows, int64(csv1.numRows)-resumePos)
@@ -859,7 +870,7 @@ func TestCSVImportMarksFilesFullyProcessed(t *testing.T) {
 
 	// All files should have been processed,
 	// and the resume position set to maxInt64.
-	js := queryJobUntil(t, sqlDB.DB, jobID, func(js jobState) bool { return jobs.StatePaused == js.status })
+	js := queryJobUntil(t, sqlDB.DB, jobID, func(js jobState) bool { return jobs.StatusPaused == js.status })
 	for _, pos := range js.prog.ResumePos {
 		assert.True(t, pos == math.MaxInt64)
 	}
@@ -871,7 +882,7 @@ func TestCSVImportMarksFilesFullyProcessed(t *testing.T) {
 	if err := registry.Unpause(ctx, nil, jobID); err != nil {
 		t.Fatal(err)
 	}
-	js = queryJobUntil(t, sqlDB.DB, jobID, func(js jobState) bool { return jobs.StateSucceeded == js.status })
+	js = queryJobUntil(t, sqlDB.DB, jobID, func(js jobState) bool { return jobs.StatusSucceeded == js.status })
 
 	// Verify that after resume we have not processed any additional rows.
 	assert.Zero(t, importSummary.Rows)
@@ -926,7 +937,9 @@ func newTestSpec(
 		descr = descForTable(ctx, t,
 			"CREATE TABLE simple (i INT PRIMARY KEY, s text )", 100, 150, 200, NoFKs)
 	case
+		roachpb.IOFileFormat_Mysqldump,
 		roachpb.IOFileFormat_MysqlOutfile,
+		roachpb.IOFileFormat_PgDump,
 		roachpb.IOFileFormat_PgCopy,
 		roachpb.IOFileFormat_Avro:
 		descr = descForTable(ctx, t,
@@ -945,8 +958,12 @@ func newTestSpec(
 	}
 	assert.True(t, numCols > 0)
 
+	fullTableName := "simple"
+	if format.Format == roachpb.IOFileFormat_PgDump {
+		fullTableName = "public.simple"
+	}
 	spec.tables = map[string]*execinfrapb.ReadImportDataSpec_ImportTable{
-		"simple": {Desc: descr.TableDesc(), TargetCols: targetCols[0:numCols]},
+		fullTableName: {Desc: descr.TableDesc(), TargetCols: targetCols[0:numCols]},
 	}
 
 	for id, path := range inputs {
@@ -954,6 +971,16 @@ func newTestSpec(
 	}
 
 	return spec
+}
+
+func pgDumpFormat() roachpb.IOFileFormat {
+	return roachpb.IOFileFormat{
+		Format: roachpb.IOFileFormat_PgDump,
+		PgDump: roachpb.PgDumpOptions{
+			MaxRowSize:        64 * 1024,
+			IgnoreUnsupported: true,
+		},
+	}
 }
 
 func pgCopyFormat() roachpb.IOFileFormat {
@@ -964,6 +991,12 @@ func pgCopyFormat() roachpb.IOFileFormat {
 			Null:       `\N`,
 			MaxRowSize: 4096,
 		},
+	}
+}
+
+func mysqlDumpFormat() roachpb.IOFileFormat {
+	return roachpb.IOFileFormat{
+		Format: roachpb.IOFileFormat_Mysqldump,
 	}
 }
 

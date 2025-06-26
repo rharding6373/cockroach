@@ -55,7 +55,6 @@ export let privileges: string;
 export let showSessions: string;
 export let sessionsTable: string;
 export let upgradeTroubleshooting: string;
-export let licensingFaqs: string;
 export let throttlingFaqs: string;
 // Note that these explicitly don't use the current version, since we want to
 // link to the most up-to-date documentation available.
@@ -124,7 +123,9 @@ export const recomputeDocsURLs = () => {
   reduceStorageOfTimeSeriesDataOperationalFlags = docsURL(
     "operational-faqs.html#can-i-reduce-or-disable-the-storage-of-time-series-data",
   );
-  performanceBestPracticesHotSpots = docsURL("understand-hotspots.html");
+  performanceBestPracticesHotSpots = docsURL(
+    "performance-best-practices-overview.html#hot-spots",
+  );
   uiDebugPages = docsURL("ui-debug-pages.html");
   readsAndWritesOverviewPage = docsURLNoVersion(
     "architecture/reads-and-writes-overview.html#important-concepts",
@@ -132,7 +133,6 @@ export const recomputeDocsURLs = () => {
   upgradeTroubleshooting = docsURL(
     "upgrade-cockroach-version.html#troubleshooting",
   );
-  licensingFaqs = docsURL("licensing-faqs#renew-an-expired-license");
   throttlingFaqs = docsURL("licensing-faqs#monitor-for-license-expiry");
 };
 

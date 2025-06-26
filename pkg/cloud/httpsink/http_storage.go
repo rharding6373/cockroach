@@ -28,7 +28,9 @@ import (
 	"github.com/cockroachdb/redact"
 )
 
-func parseHTTPURL(uri *url.URL) (cloudpb.ExternalStorage, error) {
+func parseHTTPURL(
+	_ cloud.ExternalStorageURIContext, uri *url.URL,
+) (cloudpb.ExternalStorage, error) {
 	conf := cloudpb.ExternalStorage{}
 	conf.Provider = cloudpb.ExternalStorageProvider_http
 	conf.HttpPath.BaseUri = uri.String()
@@ -55,7 +57,7 @@ func (e *retryableHTTPError) Error() string {
 
 // MakeHTTPStorage returns an instance of HTTPStorage ExternalStorage.
 func MakeHTTPStorage(
-	ctx context.Context, args cloud.EarlyBootExternalStorageContext, dest cloudpb.ExternalStorage,
+	ctx context.Context, args cloud.ExternalStorageContext, dest cloudpb.ExternalStorage,
 ) (cloud.ExternalStorage, error) {
 	telemetry.Count("external-io.http")
 	if args.IOConf.DisableHTTP {
@@ -67,12 +69,7 @@ func MakeHTTPStorage(
 	}
 
 	clientName := args.ExternalStorageOptions().ClientName
-	client, err := cloud.MakeHTTPClient(args.Settings, args.MetricsRecorder,
-		cloud.HTTPClientConfig{
-			Cloud:  "http",
-			Bucket: "base",
-			Client: clientName,
-		})
+	client, err := cloud.MakeHTTPClient(args.Settings, args.MetricsRecorder, "http", base, clientName)
 	if err != nil {
 		return nil, err
 	}
@@ -183,9 +180,6 @@ func (h *httpStorage) Delete(ctx context.Context, basename string) error {
 	return timeutil.RunWithTimeout(ctx, redact.Sprintf("DELETE %s", basename),
 		cloud.Timeout.Get(&h.settings.SV), func(ctx context.Context) error {
 			_, err := h.reqNoBody(ctx, "DELETE", basename, nil)
-			if errors.Is(err, cloud.ErrFileDoesNotExist) {
-				return nil
-			}
 			return err
 		})
 }
@@ -219,10 +213,6 @@ func (h *httpStorage) reqNoBody(
 		resp.Body.Close()
 	}
 	return resp, err
-}
-
-func isNotFoundErr(resp *http.Response) bool {
-	return resp != nil && resp.StatusCode == http.StatusNotFound
 }
 
 func (h *httpStorage) req(
@@ -263,25 +253,25 @@ func (h *httpStorage) req(
 
 	switch resp.StatusCode {
 	case 200, 201, 204, 206:
-		// Pass.
-		return resp, nil
+	// Pass.
 	default:
 		body, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		err := errors.Errorf("error response from server: %s %q", resp.Status, body)
-		if isNotFoundErr(resp) {
-			return nil, cloud.WrapErrFileDoesNotExist(err, "http storage file does not exist")
+		if err != nil && resp.StatusCode == 404 {
+			// nolint:errwrap
+			err = errors.Wrapf(
+				errors.Wrap(cloud.ErrFileDoesNotExist, "http storage file does not exist"),
+				"%v",
+				err.Error(),
+			)
 		}
 		return nil, err
 	}
+	return resp, nil
 }
 
 func init() {
 	cloud.RegisterExternalStorageProvider(cloudpb.ExternalStorageProvider_http,
-		cloud.RegisteredProvider{
-			EarlyBootParseFn:     parseHTTPURL,
-			EarlyBootConstructFn: MakeHTTPStorage,
-			RedactedParams:       cloud.RedactedParams(),
-			Schemes:              []string{"http", "https"},
-		})
+		parseHTTPURL, MakeHTTPStorage, cloud.RedactedParams(), "http", "https")
 }

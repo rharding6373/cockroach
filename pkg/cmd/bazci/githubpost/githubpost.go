@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log"
@@ -29,7 +30,7 @@ import (
 	"time"
 
 	buildutil "github.com/cockroachdb/cockroach/pkg/build/util"
-	"github.com/cockroachdb/cockroach/pkg/cmd/bazci/githubpost/issues"
+	"github.com/cockroachdb/cockroach/pkg/cmd/internal/issues"
 	"github.com/cockroachdb/cockroach/pkg/internal/codeowners"
 	"github.com/cockroachdb/cockroach/pkg/internal/team"
 	"github.com/cockroachdb/errors"
@@ -60,26 +61,21 @@ func DefaultFormatter(ctx context.Context, f Failure) (issues.IssueFormatter, is
 	repro := fmt.Sprintf("./dev test ./pkg/%s --race --stress -f %s",
 		trimPkg(f.packageName), f.testName)
 
+	var projColID int
 	var mentions []string
 	var labels []string
 	if os.Getenv("SKIP_LABEL_TEST_FAILURE") == "" {
 		labels = append(labels, issues.DefaultLabels...)
 	}
 	if len(teams) > 0 {
-		for _, tm := range teams {
-			if !tm.SilenceMentions {
-				var hasAliases bool
-				for al, purp := range tm.Aliases {
-					if purp == team.PurposeUnittest {
-						hasAliases = true
-						mentions = append(mentions, "@"+strings.TrimSpace(string(al)))
-					}
-				}
-				if !hasAliases {
-					mentions = append(mentions, "@"+string(tm.Name()))
-				}
+		projColID = teams[0].TriageColumnID
+		for _, team := range teams {
+			if !team.SilenceMentions {
+				mentions = append(mentions, "@"+string(team.Name()))
 			}
-			labels = append(labels, tm.Labels()...)
+			if team.Label != "" {
+				labels = append(labels, team.Label)
+			}
 		}
 	}
 	return issues.UnitTestFormatter, issues.PostRequest{
@@ -89,6 +85,7 @@ func DefaultFormatter(ctx context.Context, f Failure) (issues.IssueFormatter, is
 		Artifacts:       "/", // best we can do for unit tests
 		HelpCommand:     issues.UnitTestHelpCommand(repro),
 		MentionOnCreate: mentions,
+		ProjectColumnID: projColID,
 		Labels:          labels,
 	}
 }
@@ -139,19 +136,19 @@ func PostFromJSON(formatterName string, in io.Reader) {
 // and posts issues for any failed tests to GitHub. If there are no failed
 // tests, it does nothing. Unlike PostFromTestXMLWithFailurePoster, it takes a
 // formatter name.
-func PostFromTestXMLWithFormatterName(formatterName string, testXml buildutil.TestSuites) error {
+func PostFromTestXMLWithFormatterName(formatterName string, in io.Reader) error {
 	ctx := context.Background()
 	fileIssue := getFailurePosterFromFormatterName(formatterName)
-	return PostFromTestXMLWithFailurePoster(ctx, fileIssue, testXml)
+	return PostFromTestXMLWithFailurePoster(ctx, fileIssue, in)
 }
 
 // PostFromTestXMLWithFailurePoster consumes a Bazel-style `test.xml` stream and posts
 // issues for any failed tests to GitHub. If there are no failed tests, it does
 // nothing.
 func PostFromTestXMLWithFailurePoster(
-	ctx context.Context, fileIssue FailurePoster, testXml buildutil.TestSuites,
+	ctx context.Context, fileIssue FailurePoster, in io.Reader,
 ) error {
-	return listFailuresFromTestXML(ctx, testXml, fileIssue)
+	return listFailuresFromTestXML(ctx, in, fileIssue)
 }
 
 type Failure struct {
@@ -499,8 +496,17 @@ func listFailuresFromJSON(
 }
 
 func listFailuresFromTestXML(
-	ctx context.Context, suites buildutil.TestSuites, fileIssue func(context.Context, Failure) error,
+	ctx context.Context, input io.Reader, fileIssue func(context.Context, Failure) error,
 ) error {
+	var buf bytes.Buffer
+	_, err := buf.ReadFrom(input)
+	if err != nil {
+		return err
+	}
+	var suites buildutil.TestSuites
+	if err := xml.Unmarshal(buf.Bytes(), &suites); err != nil {
+		return err
+	}
 	failures := make(map[scopedTest][]testEvent)
 	for _, suite := range suites.Suites {
 		pkg := suite.Name
@@ -516,13 +522,10 @@ func listFailuresFromTestXML(
 					pkg:  pkg,
 					name: testCase.Name,
 				}
-				elapsed := 0.0
-				if testCase.Time != "" {
-					var err error
-					elapsed, err = strconv.ParseFloat(testCase.Time, 64)
-					if err != nil {
-						fmt.Printf("couldn't parse time %s as float64: %+v\n", testCase.Time, err)
-					}
+				elapsed, err := strconv.ParseFloat(testCase.Time, 64)
+				if err != nil {
+					fmt.Printf("couldn't parse time %s as float64: %+v\n", testCase.Time, err)
+					elapsed = 0.0
 				}
 				event := testEvent{
 					Action:  "fail",
@@ -691,7 +694,7 @@ func getOwner(ctx context.Context, packageName, testName string) (_teams []team.
 		}
 
 		// Workaround for #107885.
-		if strings.Contains(packageName, "backup") {
+		if strings.Contains(packageName, "backupccl") {
 			dr := co.GetTeamForAlias("cockroachdb/disaster-recovery")
 			if dr.Name() == "" {
 				log.Fatalf("disaster-recovery team could not be found in TEAMS.yaml")
@@ -718,8 +721,8 @@ func formatPebbleMetamorphicIssue(
 			s := f.testMessage[i+len(seedHeader):]
 			s = strings.TrimSpace(s)
 			s = strings.TrimSpace(s[:strings.Index(s, "\n")])
-			repro = fmt.Sprintf(`go test -tags 'invariants' -exec 'stress -p 1' `+
-				`-timeout 0 -test.v -run '%s$' ./internal/metamorphic -seed %s -ops "uniform:5000-10000"`, f.testName, s)
+			repro = fmt.Sprintf("go test -tags 'invariants' -exec 'stress -p 1' "+
+				`-timeout 0 -test.v -run TestMeta$ ./internal/metamorphic -seed %s -ops "uniform:5000-10000"`, s)
 		}
 	}
 	return issues.UnitTestFormatter, issues.PostRequest{
@@ -752,13 +755,4 @@ func postGeneralFailureImpl(logs string, fileIssue func(context.Context, Failure
 		log.Println(err) // keep going
 	}
 
-}
-
-// MicrobenchmarkFailure creates a Failure struct for a microbenchmark failure.
-func MicrobenchmarkFailure(packageName string, benchmarkName string, logs string) Failure {
-	return Failure{
-		packageName: packageName,
-		testName:    benchmarkName,
-		testMessage: logs,
-	}
 }

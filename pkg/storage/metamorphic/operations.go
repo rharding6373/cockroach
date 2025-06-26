@@ -16,11 +16,9 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
-	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/uint128"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
@@ -111,25 +109,23 @@ func closeItersOnBatch(m *metaTestRunner, reader readWriterID) (results []opRefe
 func generateMVCCScan(
 	ctx context.Context, m *metaTestRunner, reverse bool, inconsistent bool, args []string,
 ) *mvccScanOp {
-	reader := readWriterID(args[0])
-	key := m.keyGenerator.parse(args[1])
-	endKey := m.keyGenerator.parse(args[2])
+	key := m.keyGenerator.parse(args[0])
+	endKey := m.keyGenerator.parse(args[1])
 	if endKey.Less(key) {
 		key, endKey = endKey, key
 	}
 	var ts hlc.Timestamp
 	var txn txnID
 	if inconsistent {
-		ts = m.pastTSGenerator.parse(args[3])
+		ts = m.pastTSGenerator.parse(args[2])
 	} else {
-		txn = txnID(args[3])
+		txn = txnID(args[2])
 	}
-	maxKeys := int64(m.floatGenerator.parse(args[4]) * 32)
-	targetBytes := int64(m.floatGenerator.parse(args[5]) * (1 << 20))
-	allowEmpty := m.boolGenerator.parse(args[6])
+	maxKeys := int64(m.floatGenerator.parse(args[3]) * 32)
+	targetBytes := int64(m.floatGenerator.parse(args[4]) * (1 << 20))
+	allowEmpty := m.boolGenerator.parse(args[5])
 	return &mvccScanOp{
 		m:            m,
-		reader:       reader,
 		key:          key.Key,
 		endKey:       endKey.Key,
 		ts:           ts,
@@ -236,10 +232,7 @@ func (m mvccCPutOp) run(ctx context.Context) string {
 	txn.Sequence++
 
 	_, err := storage.MVCCConditionalPut(ctx, writer, m.key,
-		txn.ReadTimestamp, m.value, m.expVal, storage.ConditionalPutWriteOptions{
-			MVCCWriteOptions:    storage.MVCCWriteOptions{Txn: txn},
-			AllowIfDoesNotExist: true,
-		})
+		txn.ReadTimestamp, m.value, m.expVal, true, storage.MVCCWriteOptions{Txn: txn})
 	if err != nil {
 		if writeTooOldErr := (*kvpb.WriteTooOldError)(nil); errors.As(err, &writeTooOldErr) {
 			txn.WriteTimestamp.Forward(writeTooOldErr.ActualTimestamp)
@@ -254,48 +247,30 @@ func (m mvccCPutOp) run(ctx context.Context) string {
 	return "ok"
 }
 
-type mvccCheckForAcquireLockOp struct {
-	m                       *metaTestRunner
-	writer                  readWriterID
-	key                     roachpb.Key
-	txn                     txnID
-	strength                lock.Strength
-	maxLockConflicts        int
-	targetLockConflictBytes int64
+type mvccInitPutOp struct {
+	m      *metaTestRunner
+	writer readWriterID
+	key    roachpb.Key
+	value  roachpb.Value
+	txn    txnID
 }
 
-func (m mvccCheckForAcquireLockOp) run(ctx context.Context) string {
+func (m mvccInitPutOp) run(ctx context.Context) string {
 	txn := m.m.getTxn(m.txn)
 	writer := m.m.getReadWriter(m.writer)
+	txn.Sequence++
 
-	err := storage.MVCCCheckForAcquireLock(ctx, writer, txn, m.strength, m.key, int64(m.maxLockConflicts), m.targetLockConflictBytes)
+	_, err := storage.MVCCInitPut(ctx, writer, m.key, txn.ReadTimestamp, m.value, false, storage.MVCCWriteOptions{Txn: txn})
 	if err != nil {
+		if writeTooOldErr := (*kvpb.WriteTooOldError)(nil); errors.As(err, &writeTooOldErr) {
+			txn.WriteTimestamp.Forward(writeTooOldErr.ActualTimestamp)
+			// Update the txn's lock spans to account for this intent being written.
+			addKeyToLockSpans(txn, m.key)
+		}
 		return fmt.Sprintf("error: %s", err)
 	}
 
-	return "ok"
-}
-
-type mvccAcquireLockOp struct {
-	m                       *metaTestRunner
-	writer                  readWriterID
-	key                     roachpb.Key
-	txn                     txnID
-	strength                lock.Strength
-	maxLockConflicts        int
-	targetLockConflictBytes int64
-}
-
-func (m mvccAcquireLockOp) run(ctx context.Context) string {
-	txn := m.m.getTxn(m.txn)
-	writer := m.m.getReadWriter(m.writer)
-
-	err := storage.MVCCAcquireLock(ctx, writer, &txn.TxnMeta, txn.IgnoredSeqNums, m.strength, m.key, nil, int64(m.maxLockConflicts), m.targetLockConflictBytes)
-	if err != nil {
-		return fmt.Sprintf("error: %s", err)
-	}
-
-	// Update the txn's lock spans to account for this lock being acquired.
+	// Update the txn's lock spans to account for this intent being written.
 	addKeyToLockSpans(txn, m.key)
 	return "ok"
 }
@@ -354,8 +329,9 @@ func (m mvccDeleteRangeUsingRangeTombstoneOp) run(ctx context.Context) string {
 		return "no-op due to no non-conflicting key range"
 	}
 
-	err := storage.MVCCDeleteRangeUsingTombstone(ctx, writer, nil, m.key, m.endKey, m.ts, hlc.ClockTimestamp{}, m.key,
-		m.endKey, false /* idempotent */, math.MaxInt64 /* maxLockConflicts */, 0 /* targetLockConflictBytes */, nil /* msCovered */)
+	err := storage.MVCCDeleteRangeUsingTombstone(ctx, writer, nil, m.key, m.endKey, m.ts,
+		hlc.ClockTimestamp{}, m.key, m.endKey, false /* idempotent */, math.MaxInt64, /* maxLockConflicts */
+		nil /* msCovered */)
 	if err != nil {
 		return fmt.Sprintf("error: %s", err)
 	}
@@ -377,7 +353,7 @@ func (m mvccClearTimeRangeOp) run(ctx context.Context) string {
 		return "no-op due to no non-conflicting key range"
 	}
 	span, err := storage.MVCCClearTimeRange(ctx, m.m.engine, &enginepb.MVCCStats{}, m.key, m.endKey,
-		m.startTime, m.endTime, nil, nil, math.MaxInt64, math.MaxInt64, math.MaxInt64, 0)
+		m.startTime, m.endTime, nil, nil, math.MaxInt64, math.MaxInt64, math.MaxInt64)
 	if err != nil {
 		return fmt.Sprintf("error: %s", err)
 	}
@@ -429,7 +405,6 @@ func (m mvccFindSplitKeyOp) run(ctx context.Context) string {
 
 type mvccScanOp struct {
 	m            *metaTestRunner
-	reader       readWriterID
 	key          roachpb.Key
 	endKey       roachpb.Key
 	ts           hlc.Timestamp
@@ -442,13 +417,17 @@ type mvccScanOp struct {
 }
 
 func (m mvccScanOp) run(ctx context.Context) string {
-	reader := m.m.getReadWriter(m.reader)
 	var txn *roachpb.Transaction
 	if !m.inconsistent {
 		txn = m.m.getTxn(m.txn)
 		m.ts = txn.ReadTimestamp
 	}
-	result, err := storage.MVCCScan(ctx, reader, m.key, m.endKey, m.ts, storage.MVCCScanOptions{
+	// While MVCCScanning on a batch works in Pebble, it does not in rocksdb.
+	// This is due to batch iterators not supporting SeekForPrev. For now, use
+	// m.engine instead of a readWriterGenerator-generated engine.Reader, otherwise
+	// we will try MVCCScanning on batches and produce diffs between runs on
+	// different engines that don't point to an actual issue.
+	result, err := storage.MVCCScan(ctx, m.m.engine, m.key, m.endKey, m.ts, storage.MVCCScanOptions{
 		Inconsistent: m.inconsistent,
 		Tombstones:   true,
 		Reverse:      m.reverse,
@@ -624,7 +603,7 @@ type iterOpenOp struct {
 
 func (i iterOpenOp) run(ctx context.Context) string {
 	rw := i.m.getReadWriter(i.rw)
-	iter, err := rw.NewMVCCIterator(ctx, storage.MVCCKeyIterKind, storage.IterOptions{
+	iter, err := rw.NewMVCCIterator(storage.MVCCKeyIterKind, storage.IterOptions{
 		Prefix:     false,
 		LowerBound: i.key,
 		UpperBound: i.endKey.Next(),
@@ -770,7 +749,7 @@ type compactOp struct {
 }
 
 func (c compactOp) run(ctx context.Context) string {
-	err := c.m.engine.CompactRange(ctx, c.key, c.endKey)
+	err := c.m.engine.CompactRange(c.key, c.endKey)
 	if err != nil {
 		return fmt.Sprintf("error: %s", err.Error())
 	}
@@ -784,7 +763,7 @@ type ingestOp struct {
 
 func (i ingestOp) run(ctx context.Context) string {
 	sstPath := filepath.Join(i.m.path, "ingest.sst")
-	f, err := i.m.engineFS.Create(sstPath, fs.UnspecifiedWriteCategory)
+	f, err := i.m.engineFS.Create(sstPath)
 	if err != nil {
 		return fmt.Sprintf("error = %s", err.Error())
 	}
@@ -928,65 +907,29 @@ var opGenerators = []opGenerator{
 		weight: 50,
 	},
 	{
-		name: "mvcc_check_for_acquire_lock",
+		name: "mvcc_init_put",
 		generate: func(ctx context.Context, m *metaTestRunner, args ...string) mvccOp {
 			writer := readWriterID(args[0])
 			txn := txnID(args[1])
 			key := m.txnKeyGenerator.parse(args[2])
-			strength := lock.Shared
-			if m.floatGenerator.parse(args[3]) < 0.5 {
-				strength = lock.Exclusive
-			}
-			maxLockConflicts := int(m.floatGenerator.parse(args[4]) * 1000)
-
-			return &mvccCheckForAcquireLockOp{
-				m:                m,
-				writer:           writer,
-				key:              key.Key,
-				txn:              txn,
-				strength:         strength,
-				maxLockConflicts: maxLockConflicts,
-			}
-		},
-		operands: []operandType{
-			operandReadWriter,
-			operandTransaction,
-			operandMVCCKey,
-			operandFloat,
-			operandFloat,
-		},
-		weight: 50,
-	},
-	{
-		name: "mvcc_acquire_lock",
-		generate: func(ctx context.Context, m *metaTestRunner, args ...string) mvccOp {
-			writer := readWriterID(args[0])
-			txn := txnID(args[1])
-			key := m.txnKeyGenerator.parse(args[2])
-			strength := lock.Shared
-			if m.floatGenerator.parse(args[3]) < 0.5 {
-				strength = lock.Exclusive
-			}
-			maxLockConflicts := int(m.floatGenerator.parse(args[4]) * 1000)
+			value := roachpb.MakeValueFromBytes(m.valueGenerator.parse(args[3]))
 
 			// Track this write in the txn generator. This ensures the batch will be
-			// committed before the transaction is committed.
+			// committed before the transaction is committed
 			m.txnGenerator.trackTransactionalWrite(writer, txn, key.Key, nil)
-			return &mvccAcquireLockOp{
-				m:                m,
-				writer:           writer,
-				key:              key.Key,
-				txn:              txn,
-				strength:         strength,
-				maxLockConflicts: maxLockConflicts,
+			return &mvccInitPutOp{
+				m:      m,
+				writer: writer,
+				key:    key.Key,
+				value:  value,
+				txn:    txn,
 			}
 		},
 		operands: []operandType{
 			operandReadWriter,
 			operandTransaction,
 			operandUnusedMVCCKey,
-			operandFloat,
-			operandFloat,
+			operandValue,
 		},
 		weight: 50,
 	},
@@ -1142,7 +1085,6 @@ var opGenerators = []opGenerator{
 			return generateMVCCScan(ctx, m, false, false, args)
 		},
 		operands: []operandType{
-			operandReadWriter,
 			operandMVCCKey,
 			operandMVCCKey,
 			operandTransaction,
@@ -1159,7 +1101,6 @@ var opGenerators = []opGenerator{
 			return generateMVCCScan(ctx, m, false, true, args)
 		},
 		operands: []operandType{
-			operandReadWriter,
 			operandMVCCKey,
 			operandMVCCKey,
 			operandPastTS,
@@ -1176,7 +1117,6 @@ var opGenerators = []opGenerator{
 			return generateMVCCScan(ctx, m, true, false, args)
 		},
 		operands: []operandType{
-			operandReadWriter,
 			operandMVCCKey,
 			operandMVCCKey,
 			operandTransaction,
