@@ -9,6 +9,7 @@ package schematestutils
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"testing"
 
@@ -135,37 +136,43 @@ func AddDropIndexMutation(desc catalog.TableDescriptor) catalog.TableDescriptor 
 	return tabledesc.NewBuilder(desc.TableDesc()).BuildImmutableTable()
 }
 
-// FetchDescVersionModificationTime fetches the `ModificationTime` of the
-// specified `version` of `tableName`'s table descriptor.
-func FetchDescVersionModificationTime(
-	t testing.TB,
-	s serverutils.ApplicationLayerInterface,
-	dbName string,
-	schemaName string,
-	tableName string,
-	version int,
-) hlc.Timestamp {
-	db := s.SQLConn(t, serverutils.DBName(dbName))
+// tableDescVersion holds a single version of a table descriptor as read from
+// the MVCC history.
+type tableDescVersion struct {
+	version descpb.DescriptorVersion
+	modTime hlc.Timestamp
+	desc    catalog.TableDescriptor
+}
 
-	tblKey := s.Codec().IndexPrefix(keys.DescriptorTableID, keys.DescriptorTablePrimaryKeyIndexID)
-	header := kvpb.RequestHeader{
-		Key:    tblKey,
-		EndKey: tblKey.PrefixEnd(),
-	}
-	dropColTblID := sqlutils.QueryTableID(t, db, dbName, schemaName, tableName)
-	req := &kvpb.ExportRequest{
-		RequestHeader: header,
-		MVCCFilter:    kvpb.MVCCFilter_All,
-		StartTime:     hlc.Timestamp{},
-	}
-	hh := kvpb.Header{Timestamp: hlc.NewClockForTesting(nil).Now()}
-	res, pErr := kv.SendWrappedWith(context.Background(),
-		s.DB().NonTransactionalSender(), hh, req)
+// fetchAllTableDescVersions exports all MVCC versions of the named table's
+// descriptor from the KV store, returning them sorted by version number and
+// deduplicated.
+func fetchAllTableDescVersions(
+	t testing.TB, s serverutils.ApplicationLayerInterface, dbName, schemaName, tableName string,
+) []tableDescVersion {
+	db := s.SQLConn(t, serverutils.DBName(dbName))
+	tblKey := s.Codec().IndexPrefix(
+		keys.DescriptorTableID, keys.DescriptorTablePrimaryKeyIndexID,
+	)
+	tblID := sqlutils.QueryTableID(t, db, dbName, schemaName, tableName)
+
+	res, pErr := kv.SendWrappedWith(
+		context.Background(),
+		s.DB().NonTransactionalSender(),
+		kvpb.Header{Timestamp: hlc.NewClockForTesting(nil).Now()},
+		&kvpb.ExportRequest{
+			RequestHeader: kvpb.RequestHeader{Key: tblKey, EndKey: tblKey.PrefixEnd()},
+			MVCCFilter:    kvpb.MVCCFilter_All,
+			StartTime:     hlc.Timestamp{},
+		},
+	)
 	if pErr != nil {
 		t.Fatal(pErr.GoError())
 	}
+
+	var versions []tableDescVersion
 	for _, file := range res.(*kvpb.ExportResponse).Files {
-		ts, found := func() (hlc.Timestamp, bool) {
+		func() {
 			it, err := storage.NewMemSSTIterator(file.SST, false /* verify */, storage.IterOptions{
 				KeyTypes:   storage.IterKeyTypePointsAndRanges,
 				LowerBound: keys.MinKey,
@@ -179,7 +186,7 @@ func FetchDescVersionModificationTime(
 				if ok, err := it.Valid(); err != nil {
 					t.Fatal(err)
 				} else if !ok {
-					return hlc.Timestamp{}, false
+					return
 				}
 				k := it.UnsafeKey()
 				if _, hasRange := it.HasPointAndRange(); hasRange {
@@ -193,13 +200,13 @@ func FetchDescVersionModificationTime(
 				if err != nil {
 					t.Fatal(err)
 				}
-				if tableID != uint64(dropColTblID) {
+				if tableID != uint64(tblID) {
 					continue
 				}
 				unsafeValue, err := it.UnsafeValue()
 				require.NoError(t, err)
 				if unsafeValue == nil {
-					t.Fatal(errors.New(`value was dropped or truncated`))
+					continue // skip MVCC tombstones
 				}
 				value := roachpb.Value{RawBytes: unsafeValue, Timestamp: k.Timestamp}
 				b, err := descbuilder.FromSerializedValue(&value)
@@ -209,14 +216,43 @@ func FetchDescVersionModificationTime(
 				require.NotNil(t, b)
 				if b.DescriptorType() == catalog.Table {
 					tbl := b.BuildImmutable().(catalog.TableDescriptor)
-					if int(tbl.GetVersion()) == version {
-						return tbl.GetModificationTime(), true
-					}
+					versions = append(versions, tableDescVersion{
+						version: tbl.GetVersion(),
+						modTime: tbl.GetModificationTime(),
+						desc:    tbl,
+					})
 				}
 			}
 		}()
-		if found {
-			return ts
+	}
+
+	sort.Slice(versions, func(i, j int) bool {
+		return versions[i].version < versions[j].version
+	})
+
+	// Deduplicate by version, keeping the first occurrence.
+	deduped := versions[:0]
+	for i, v := range versions {
+		if i == 0 || v.version != versions[i-1].version {
+			deduped = append(deduped, v)
+		}
+	}
+	return deduped
+}
+
+// FetchDescVersionModificationTime fetches the ModificationTime of the
+// specified version of tableName's table descriptor.
+func FetchDescVersionModificationTime(
+	t testing.TB,
+	s serverutils.ApplicationLayerInterface,
+	dbName string,
+	schemaName string,
+	tableName string,
+	version int,
+) hlc.Timestamp {
+	for _, v := range fetchAllTableDescVersions(t, s, dbName, schemaName, tableName) {
+		if int(v.version) == version {
+			return v.modTime
 		}
 	}
 	t.Fatal(errors.New(`couldn't find table desc for given version`))
