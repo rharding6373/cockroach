@@ -258,3 +258,74 @@ func FetchDescVersionModificationTime(
 	t.Fatal(errors.New(`couldn't find table desc for given version`))
 	return hlc.Timestamp{}
 }
+
+// FetchDescVersionModificationTimeByPredicate fetches the ModificationTime of
+// the first descriptor version transition where pred(before, after) returns
+// true, iterating through versions in ascending order. This avoids hardcoding
+// specific descriptor version numbers which may change with schema changer
+// implementation details.
+func FetchDescVersionModificationTimeByPredicate(
+	t testing.TB,
+	s serverutils.ApplicationLayerInterface,
+	dbName string,
+	schemaName string,
+	tableName string,
+	pred func(before, after catalog.TableDescriptor) bool,
+) hlc.Timestamp {
+	versions := fetchAllTableDescVersions(t, s, dbName, schemaName, tableName)
+	for i := 1; i < len(versions); i++ {
+		if pred(versions[i-1].desc, versions[i].desc) {
+			return versions[i].modTime
+		}
+	}
+	t.Fatal(errors.New(`couldn't find table desc version matching predicate`))
+	return hlc.Timestamp{}
+}
+
+// DropVisibleColumnPredicate returns true for the descriptor version transition
+// where a visible column drop mutation first appears. This matches the event
+// that triggers a changefeed backfill for a DROP COLUMN.
+func DropVisibleColumnPredicate(before, after catalog.TableDescriptor) bool {
+	return !hasVisibleDropMutation(before) && hasVisibleDropMutation(after)
+}
+
+// hasVisibleDropMutation checks whether the descriptor has a non-hidden column
+// in a DROP mutation in WriteAndDeleteOnly state, with the additional constraint
+// that for declarative schema changes the primary index merge must have
+// occurred. This replicates the logic in schemafeed.dropVisibleColumnMutationExists.
+func hasVisibleDropMutation(desc catalog.TableDescriptor) bool {
+	for _, m := range desc.AllMutations() {
+		col := m.AsColumn()
+		if col == nil || col.IsHidden() {
+			continue
+		}
+		if m.Dropped() && m.WriteAndDeleteOnly() {
+			if desc.GetDeclarativeSchemaChangerState() == nil {
+				return true
+			}
+			if catalog.HasDeclarativeMergedPrimaryIndex(desc) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// AddVisibleColumnPredicate returns a predicate that matches the descriptor
+// version transition where the named column's backfill completes and it becomes
+// visible. This matches the event that triggers a changefeed backfill for an
+// ADD COLUMN with a default value.
+func AddVisibleColumnPredicate(colName string) func(before, after catalog.TableDescriptor) bool {
+	return func(before, after catalog.TableDescriptor) bool {
+		if !(len(before.VisibleColumns()) < len(after.VisibleColumns()) &&
+			before.HasColumnBackfillMutation() && !after.HasColumnBackfillMutation()) {
+			return false
+		}
+		for _, col := range after.VisibleColumns() {
+			if col.GetName() == colName {
+				return true
+			}
+		}
+		return false
+	}
+}
