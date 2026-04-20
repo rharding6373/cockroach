@@ -7,8 +7,10 @@ package tests
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"math/rand"
+	"net/url"
 	"os"
 	"strings"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/blobs"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl"
 	"github.com/cockroachdb/cockroach/pkg/cloud"
+	"github.com/cockroachdb/cockroach/pkg/cloud/gcp"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -223,6 +226,35 @@ func downloadFiles(
 	return
 }
 
+// sinkURIForRoachtestRunner rewrites a changefeed sink URI so that it can be
+// accessed from the roachtest runner. The changefeed nodes use AUTH=implicit
+// (GCE metadata) to write to GCS, but the roachtest runner may not have GCE
+// metadata credentials. If GOOGLE_EPHEMERAL_CREDENTIALS is set, this function
+// replaces implicit auth with explicit credentials.
+func sinkURIForRoachtestRunner(sinkURI string) (string, error) {
+	uri := strings.TrimPrefix(sinkURI, `experimental-`)
+
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "gs" {
+		return uri, nil
+	}
+
+	creds := os.Getenv(KMSGCSCredentials)
+	if creds == "" {
+		return uri, nil
+	}
+
+	q := parsed.Query()
+	q.Set(cloud.AuthParam, cloud.AuthParamSpecified)
+	q.Set(gcp.CredentialsParam,
+		base64.StdEncoding.EncodeToString([]byte(creds)))
+	parsed.RawQuery = q.Encode()
+	return parsed.String(), nil
+}
+
 // processEventsAndReturnFingerprint parses the changefeed sink output, loads
 // the events into a table by UPSERT, and returns the fingerprint of the table
 // in string format.
@@ -234,8 +266,13 @@ func (m *metamorphicTestHelper) loadOpsToTableAndShowFingerprint(
 	selectedTargetTableName string,
 	newTableName string,
 ) string {
+	// Rewrite the sink URI to use explicit credentials when running on the
+	// roachtest runner, which may not have GCE metadata credentials.
+	storageURI, err := sinkURIForRoachtestRunner(sinkURI)
+	require.NoError(t, err)
+
 	// Grab a handler to the cloud storage for the given sinks.
-	cs, err := cloud.ExternalStorageFromURI(ctx, strings.TrimPrefix(sinkURI, `experimental-`),
+	cs, err := cloud.ExternalStorageFromURI(ctx, storageURI,
 		base.ExternalIODirConfig{},
 		cluster.MakeTestingClusterSettings(),
 		blobs.TestEmptyBlobClientFactory,
